@@ -1,0 +1,42 @@
+﻿# ============================================================
+# AI CANARY - GIT IGNORE
+# ============================================================
+
+# Runtime execution artifacts
+runtime/
+
+# AI generated decision / telemetry output
+ai-engine/ai_decision.json
+ai-engine/ai_risk_context.json
+ai-engine/ai_metrics.prom
+ai-engine/ai_test.prom
+
+# Python generated files
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Backup / temporary files
+*.bak
+*.tmp
+*.temp
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE / editor local settings
+.vscode/
+.idea/
+
+# PowerShell temporary files
+*.clixml

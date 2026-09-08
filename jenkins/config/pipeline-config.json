@@ -1,0 +1,57 @@
+{
+  "project": {
+    "name": "ai-canary",
+    "cluster_name": "ai-canary",
+    "namespace": "ai-canary",
+    "rollout_name": "ai-canary-demo",
+    "service_name": "ai-canary-demo"
+  },
+  "demo": {
+    "normal_stage_delay_seconds": 20,
+    "deployment_observation_hold_seconds": 60,
+    "final_demo_hold_seconds": 60,
+    "scenario_parameter_name": "DEMO_SCENARIO"
+  },
+  "traffic": {
+    "generator_pod": "traffic-generator",
+    "request_path": "/api/orders",
+    "request_interval_seconds": 0.05
+  },
+  "ai": {
+    "observation_windows": 4,
+    "observation_interval_seconds": 30,
+    "ollama_url": "http://localhost:11434",
+    "model": "qwen3:4b-instruct"
+  },
+  "monitoring": {
+    "prometheus_url": "http://localhost:9090",
+    "grafana_url": "http://localhost:3001",
+    "pushgateway_url": "http://localhost:9091",
+    "grafana_refresh_seconds": 5
+  },
+  "ports": {
+    "prometheus": 9090,
+    "grafana": 3001,
+    "pushgateway": 9091
+  },
+  "runtime": {
+    "root": "runtime",
+    "rendered_dir": "runtime/rendered",
+    "stages_dir": "runtime/stages",
+    "reports_dir": "runtime/reports",
+    "graphs_dir": "runtime/graphs",
+    "logs_dir": "runtime/logs"
+  },
+  "reporting": {
+    "enabled": true,
+    "format": "html",
+    "include_fault_injection_details": false,
+    "archive_in_jenkins": true,
+    "email_report": true
+  },
+  "cleanup": {
+    "destroy_kind_cluster": true,
+    "preserve_docker_images": true,
+    "preserve_ollama_models": true
+  }
+}

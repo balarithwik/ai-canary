@@ -1,0 +1,7 @@
+{
+  "scenario": "ROLLBACK_AT_50",
+  "checkpoints": [20, 50],
+  "final_weight": 100,
+  "inject_fault": true,
+  "fault_weight": 50
+}

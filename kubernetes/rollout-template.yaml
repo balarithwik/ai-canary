@@ -1,0 +1,55 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: __ROLLOUT_NAME__
+  namespace: __NAMESPACE__
+spec:
+  replicas: 5
+  revisionHistoryLimit: 4
+
+  selector:
+    matchLabels:
+      app: __APP_NAME__
+
+  strategy:
+    canary:
+      steps:
+__CANARY_STEPS__
+
+  template:
+    metadata:
+      labels:
+        app: __APP_NAME__
+        version: "__APP_VERSION__"
+
+    spec:
+      containers:
+        - name: __CONTAINER_NAME__
+          image: __IMAGE__
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 5000
+
+          env:
+            - name: APP_VERSION
+              value: "__APP_VERSION__"
+
+            - name: DELAY_MS
+              value: "__DELAY_MS__"
+
+            - name: ERROR_RATE
+              value: "__ERROR_RATE__"
+
+            - name: DEMO_CONTROL_ENABLED
+              value: "__DEMO_CONTROL_ENABLED__"
+
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "64Mi"
+
+            limits:
+              cpu: "250m"
+              memory: "128Mi"

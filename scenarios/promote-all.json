@@ -1,0 +1,7 @@
+{
+  "scenario": "ALL_STAGES_PROMOTE",
+  "description": "Healthy Canary promotion demonstration",
+  "checkpoints": [20, 50],
+  "final_weight": 100,
+  "inject_fault": false
+}
