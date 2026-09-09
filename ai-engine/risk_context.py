@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import subprocess
 import time
@@ -41,6 +42,31 @@ HARD_RESTART_COUNT = 3
 
 OUTPUT_FILE = "ai_risk_context.json"
 
+# Final 100% checkpoint support. At 100% Candidate traffic there is
+# intentionally no live Stable request stream. The final AI cycle
+# therefore compares four NEW live Candidate windows against the
+# Stable baseline already captured at the 50% checkpoint.
+FINAL_CHECKPOINT_MODE = (
+    os.environ.get(
+        "AI_FINAL_CHECKPOINT_MODE",
+        ""
+    ).strip().lower()
+    in {
+        "1",
+        "true",
+        "yes"
+    }
+)
+
+STABLE_REFERENCE_CONTEXT_FILE = (
+    os.environ.get(
+        "AI_STABLE_REFERENCE_CONTEXT",
+        ""
+    ).strip()
+)
+
+_STABLE_REFERENCE = None
+
 
 # ============================================================
 # COMMAND HELPER
@@ -56,6 +82,163 @@ def run_json(command):
     )
 
     return json.loads(result.stdout)
+
+
+def _reference_number(
+    value,
+    field_name
+):
+
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise RuntimeError(
+            f"Stored Stable reference field '{field_name}' is invalid."
+        )
+
+
+def load_stable_reference():
+
+    global _STABLE_REFERENCE
+
+    if not FINAL_CHECKPOINT_MODE:
+        return None
+
+    if _STABLE_REFERENCE is not None:
+        return _STABLE_REFERENCE
+
+    if not STABLE_REFERENCE_CONTEXT_FILE:
+        raise RuntimeError(
+            "Final checkpoint mode requires AI_STABLE_REFERENCE_CONTEXT."
+        )
+
+    if not os.path.exists(
+        STABLE_REFERENCE_CONTEXT_FILE
+    ):
+        raise RuntimeError(
+            "Stored Stable reference context was not found: "
+            f"{STABLE_REFERENCE_CONTEXT_FILE}"
+        )
+
+    with open(
+        STABLE_REFERENCE_CONTEXT_FILE,
+        "r",
+        encoding="utf-8-sig"
+    ) as file:
+        context = json.load(file)
+
+    deployment = context.get(
+        "deployment",
+        {}
+    )
+
+    signals = context.get(
+        "signals",
+        {}
+    )
+
+    latency = signals.get(
+        "latency",
+        {}
+    )
+
+    errors = signals.get(
+        "errors",
+        {}
+    )
+
+    cpu = signals.get(
+        "cpu",
+        {}
+    )
+
+    memory = signals.get(
+        "memory",
+        {}
+    )
+
+    traffic = context.get(
+        "traffic",
+        {}
+    )
+
+    stable_version = str(
+        deployment.get(
+            "stable_version",
+            ""
+        )
+    ).strip()
+
+    canary_version = str(
+        deployment.get(
+            "canary_version",
+            ""
+        )
+    ).strip()
+
+    if not stable_version or not canary_version:
+        raise RuntimeError(
+            "Stored 50% reference context is missing deployment versions."
+        )
+
+    stable_requests = _reference_number(
+        traffic.get(
+            "stable_requests",
+            0
+        ),
+        "traffic.stable_requests"
+    )
+
+    if stable_requests < MIN_STABLE_REQUESTS:
+        raise RuntimeError(
+            "Stored 50% Stable reference does not contain enough traffic "
+            f"({stable_requests:.0f} requests; minimum {MIN_STABLE_REQUESTS})."
+        )
+
+    _STABLE_REFERENCE = {
+        "stable_version": stable_version,
+        "canary_version": canary_version,
+        "stable_latency_ms": _reference_number(
+            latency.get(
+                "stable_ms",
+                0
+            ),
+            "signals.latency.stable_ms"
+        ),
+        "stable_error_rate": _reference_number(
+            errors.get(
+                "stable_percent",
+                0
+            ),
+            "signals.errors.stable_percent"
+        ),
+        "stable_cpu_m": _reference_number(
+            cpu.get(
+                "stable_millicores",
+                0
+            ),
+            "signals.cpu.stable_millicores"
+        ),
+        "stable_memory_mb": _reference_number(
+            memory.get(
+                "stable_mb",
+                0
+            ),
+            "signals.memory.stable_mb"
+        ),
+        "stable_requests": stable_requests,
+        "source_file": STABLE_REFERENCE_CONTEXT_FILE,
+        "source_checkpoint": 50
+    }
+
+    if _STABLE_REFERENCE[
+        "stable_latency_ms"
+    ] <= 0:
+        raise RuntimeError(
+            "Stored 50% Stable latency reference is unavailable."
+        )
+
+    return _STABLE_REFERENCE
 
 
 # ============================================================
@@ -269,16 +452,57 @@ def collect_observation():
         "replica_set"
     ]
 
+    reference = load_stable_reference()
+
+    if reference is not None:
+
+        if reference[
+            "stable_version"
+        ] != stable_version:
+            raise RuntimeError(
+                "Stored Stable reference version does not match the live Rollout. "
+                f"Reference='{reference['stable_version']}' Live='{stable_version}'."
+            )
+
+        if reference[
+            "canary_version"
+        ] != canary_version:
+            raise RuntimeError(
+                "Stored Candidate reference version does not match the live Rollout. "
+                f"Reference='{reference['canary_version']}' Live='{canary_version}'."
+            )
+
 
     # --------------------------------------------------------
     # APPLICATION METRICS
     # --------------------------------------------------------
 
-    stable_app = (
-        telemetry.collect_application_metrics(
-            stable_version
+    if reference is None:
+
+        stable_app = (
+            telemetry.collect_application_metrics(
+                stable_version
+            )
         )
-    )
+
+    else:
+
+        stable_app = {
+            "avg_latency_ms":
+                reference[
+                    "stable_latency_ms"
+                ],
+
+            "error_rate_percent":
+                reference[
+                    "stable_error_rate"
+                ],
+
+            "requests":
+                reference[
+                    "stable_requests"
+                ]
+        }
 
     canary_app = (
         telemetry.collect_application_metrics(
@@ -291,13 +515,6 @@ def collect_observation():
     # POD DISCOVERY
     # --------------------------------------------------------
 
-    stable_pods = (
-        telemetry.discover_pods_for_replicaset(
-            namespace,
-            stable_rs
-        )
-    )
-
     canary_pods = (
         telemetry.discover_pods_for_replicaset(
             namespace,
@@ -305,17 +522,27 @@ def collect_observation():
         )
     )
 
+    if reference is None:
+
+        stable_pods = (
+            telemetry.discover_pods_for_replicaset(
+                namespace,
+                stable_rs
+            )
+        )
+
+    else:
+
+        # Stable pods may already be scaled down at the 100%
+        # Candidate pause. Final AI validation therefore uses
+        # the saved 50% Stable baseline instead of requiring
+        # live Stable replicas.
+        stable_pods = []
+
 
     # --------------------------------------------------------
     # RESOURCE USAGE
     # --------------------------------------------------------
-
-    stable_resource = (
-        telemetry.collect_resource_metrics(
-            namespace,
-            stable_pods
-        )
-    )
 
     canary_resource = (
         telemetry.collect_resource_metrics(
@@ -324,17 +551,38 @@ def collect_observation():
         )
     )
 
+    if reference is None:
+
+        stable_resource = (
+            telemetry.collect_resource_metrics(
+                namespace,
+                stable_pods
+            )
+        )
+
+    else:
+
+        stable_resource = {
+            "cpu_millicores_per_pod":
+                reference[
+                    "stable_cpu_m"
+                ],
+
+            "memory_mb_per_pod":
+                reference[
+                    "stable_memory_mb"
+                ],
+
+            "pod_count": 0,
+            "ready_pods": 0,
+            "healthy": True,
+            "restarts": 0
+        }
+
 
     # --------------------------------------------------------
     # RESOURCE LIMITS
     # --------------------------------------------------------
-
-    stable_limits = (
-        get_resource_limits(
-            namespace,
-            stable_rs
-        )
-    )
 
     canary_limits = (
         get_resource_limits(
@@ -342,6 +590,24 @@ def collect_observation():
             canary_rs
         )
     )
+
+    if reference is None:
+
+        stable_limits = (
+            get_resource_limits(
+                namespace,
+                stable_rs
+            )
+        )
+
+    else:
+
+        # Stable and Candidate use the same Rollout resource
+        # contract in this POC. Reuse live Candidate limits only
+        # for calculating reference saturation percentages.
+        stable_limits = dict(
+            canary_limits
+        )
 
 
     # --------------------------------------------------------
@@ -419,30 +685,23 @@ def collect_observation():
         ]
     )
 
-
     cpu_change = percent_change(
         stable_cpu,
         canary_cpu
     )
 
-
     stable_cpu_saturation = (
         saturation_percent(
-
             stable_cpu,
-
             stable_limits[
                 "cpu_limit_m"
             ]
         )
     )
 
-
     canary_cpu_saturation = (
         saturation_percent(
-
             canary_cpu,
-
             canary_limits[
                 "cpu_limit_m"
             ]
@@ -466,30 +725,23 @@ def collect_observation():
         ]
     )
 
-
     memory_change = percent_change(
         stable_memory,
         canary_memory
     )
 
-
     stable_memory_saturation = (
         saturation_percent(
-
             stable_memory,
-
             stable_limits[
                 "memory_limit_mb"
             ]
         )
     )
 
-
     canary_memory_saturation = (
         saturation_percent(
-
             canary_memory,
-
             canary_limits[
                 "memory_limit_mb"
             ]
@@ -499,140 +751,44 @@ def collect_observation():
 
     return {
 
-        # Needed by existing trend engine
-
-        "stable_version":
-            stable_version,
-
-        "canary_version":
-            canary_version,
-
-        "stable_latency_ms":
-            stable_app[
-                "avg_latency_ms"
-            ],
-
-        "canary_latency_ms":
-            canary_app[
-                "avg_latency_ms"
-            ],
-
-        "latency_change_percent":
-            latency_change,
-
-        "stable_error_rate":
-            stable_app[
-                "error_rate_percent"
-            ],
-
-        "canary_error_rate":
-            canary_app[
-                "error_rate_percent"
-            ],
-
-        "error_delta_pp":
-            error_delta,
-
-        "stable_cpu_m":
-            stable_cpu,
-
-        "canary_cpu_m":
-            canary_cpu,
-
-        "cpu_change_percent":
-            cpu_change,
-
-        "stable_memory_mb":
-            stable_memory,
-
-        "canary_memory_mb":
-            canary_memory,
-
-        "memory_change_percent":
-            memory_change,
-
-        "canary_healthy":
-            canary_resource[
-                "healthy"
-            ],
-
-        "canary_restarts":
-            canary_resource[
-                "restarts"
-            ],
-
-
-        # Additional intelligence context
-
-        "stable_requests":
-            stable_app[
-                "requests"
-            ],
-
-        "canary_requests":
-            canary_app[
-                "requests"
-            ],
-
-        "latency_ratio":
-            latency_ratio,
-
-        "stable_cpu_limit_m":
-            stable_limits[
-                "cpu_limit_m"
-            ],
-
-        "canary_cpu_limit_m":
-            canary_limits[
-                "cpu_limit_m"
-            ],
-
-        "stable_cpu_saturation_percent":
-            stable_cpu_saturation,
-
-        "canary_cpu_saturation_percent":
-            canary_cpu_saturation,
-
-        "stable_memory_limit_mb":
-            stable_limits[
-                "memory_limit_mb"
-            ],
-
-        "canary_memory_limit_mb":
-            canary_limits[
-                "memory_limit_mb"
-            ],
-
-        "stable_memory_saturation_percent":
-            stable_memory_saturation,
-
-        "canary_memory_saturation_percent":
-            canary_memory_saturation,
-
-        "stable_pod_count":
-            stable_resource[
-                "pod_count"
-            ],
-
-        "stable_ready_pods":
-            stable_resource[
-                "ready_pods"
-            ],
-
-        "canary_pod_count":
-            canary_resource[
-                "pod_count"
-            ],
-
-        "canary_ready_pods":
-            canary_resource[
-                "ready_pods"
-            ],
-
-        "stable_restarts":
-            stable_resource[
-                "restarts"
-            ]
+        "stable_version": stable_version,
+        "canary_version": canary_version,
+        "stable_latency_ms": stable_app["avg_latency_ms"],
+        "canary_latency_ms": canary_app["avg_latency_ms"],
+        "latency_change_percent": latency_change,
+        "stable_error_rate": stable_app["error_rate_percent"],
+        "canary_error_rate": canary_app["error_rate_percent"],
+        "error_delta_pp": error_delta,
+        "stable_cpu_m": stable_cpu,
+        "canary_cpu_m": canary_cpu,
+        "cpu_change_percent": cpu_change,
+        "stable_memory_mb": stable_memory,
+        "canary_memory_mb": canary_memory,
+        "memory_change_percent": memory_change,
+        "canary_healthy": canary_resource["healthy"],
+        "canary_restarts": canary_resource["restarts"],
+        "stable_requests": stable_app["requests"],
+        "canary_requests": canary_app["requests"],
+        "latency_ratio": latency_ratio,
+        "stable_cpu_limit_m": stable_limits["cpu_limit_m"],
+        "canary_cpu_limit_m": canary_limits["cpu_limit_m"],
+        "stable_cpu_saturation_percent": stable_cpu_saturation,
+        "canary_cpu_saturation_percent": canary_cpu_saturation,
+        "stable_memory_limit_mb": stable_limits["memory_limit_mb"],
+        "canary_memory_limit_mb": canary_limits["memory_limit_mb"],
+        "stable_memory_saturation_percent": stable_memory_saturation,
+        "canary_memory_saturation_percent": canary_memory_saturation,
+        "stable_pod_count": stable_resource["pod_count"],
+        "stable_ready_pods": stable_resource["ready_pods"],
+        "canary_pod_count": canary_resource["pod_count"],
+        "canary_ready_pods": canary_resource["ready_pods"],
+        "stable_restarts": stable_resource["restarts"],
+        "stable_reference_mode": (
+            "CHECKPOINT_50_MEDIAN"
+            if reference is not None
+            else
+            "LIVE"
+        )
     }
 
 
@@ -1128,6 +1284,20 @@ def aggregate_observations(
         "excluded_window_details":
             excluded_windows
     }
+
+
+    if FINAL_CHECKPOINT_MODE:
+
+        data_quality.update({
+            "stable_reference_mode":
+                "CHECKPOINT_50_MEDIAN",
+            "stable_reference_live_traffic":
+                False,
+            "canary_windows_live":
+                True,
+            "stable_reference_checkpoint":
+                50
+        })
 
 
     return (
@@ -1886,7 +2056,31 @@ def build_ai_context(
                     "canary"
                 ][
                     "weight"
-                ]
+                ],
+
+            "stable_reference_mode":
+                (
+                    "CHECKPOINT_50_MEDIAN"
+                    if FINAL_CHECKPOINT_MODE
+                    else
+                    "LIVE"
+                ),
+
+            "stable_reference_checkpoint":
+                (
+                    50
+                    if FINAL_CHECKPOINT_MODE
+                    else
+                    None
+                ),
+
+            "stable_live_traffic":
+                (
+                    False
+                    if FINAL_CHECKPOINT_MODE
+                    else
+                    True
+                )
         },
 
 
@@ -1930,7 +2124,13 @@ def build_ai_context(
                 ],
 
             "representative_values":
-                "Median of valid telemetry windows"
+                (
+                    "Median of four live Candidate windows against the "
+                    "stored 50% Stable baseline"
+                    if FINAL_CHECKPOINT_MODE
+                    else
+                    "Median of valid telemetry windows"
+                )
         },
 
 
@@ -2043,6 +2243,15 @@ def print_context(
         f"{deployment['canary_version']} "
         f"({deployment['canary_weight']}%)"
     )
+
+
+    if FINAL_CHECKPOINT_MODE:
+        print(
+            "Stable Source : Stored 50% Stable baseline"
+        )
+        print(
+            "Canary Source : Four NEW live windows at 100% exposure"
+        )
 
 
     data_quality = context.get(
@@ -2351,6 +2560,31 @@ def main():
         )
 
         return
+
+
+    if FINAL_CHECKPOINT_MODE:
+
+        try:
+            reference = load_stable_reference()
+        except Exception as error:
+            print(
+                f"\nUnable to load final Stable reference: {error}"
+            )
+            return
+
+        print(
+            "\nFINAL 100% CHECKPOINT MODE"
+        )
+        print(
+            "Stable comparison uses the stored 50% baseline; "
+            "all Candidate observations remain live."
+        )
+        print(
+            f"Reference Stable : {reference['stable_version']}"
+        )
+        print(
+            f"Candidate        : {reference['canary_version']}"
+        )
 
 
     observations = []

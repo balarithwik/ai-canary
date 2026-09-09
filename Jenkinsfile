@@ -809,6 +809,181 @@ pipeline {
                         -Action START
                 '''
 
+                script {
+
+                    if (
+                        params.DEMO_SCENARIO ==
+                        'ALL_STAGES_PROMOTE'
+                    ) {
+
+                        echo 'Waiting for the 100% Candidate AI checkpoint...'
+
+                        powershell '''
+                            $Config = Get-Content `
+                                ./jenkins/config/pipeline-config.json `
+                                -Raw |
+                                ConvertFrom-Json
+
+                            $Namespace = [string]$Config.project.namespace
+                            $RolloutName = [string]$Config.project.rollout_name
+                            $StatePath = "./runtime/scenario-state.json"
+
+                            if (-not (Test-Path $StatePath)) {
+                                Write-Host "[FAIL] scenario-state.json not found."
+                                exit 1
+                            }
+
+                            $TimeoutSeconds = 180
+                            $PollSeconds = 3
+                            $Elapsed = 0
+                            $Reached = $false
+
+                            while ($Elapsed -le $TimeoutSeconds) {
+
+                                $RolloutRaw = kubectl get rollout `
+                                    $RolloutName `
+                                    -n $Namespace `
+                                    -o json
+
+                                if ($LASTEXITCODE -ne 0) {
+                                    Write-Host "[FAIL] Unable to read Rollout at final checkpoint."
+                                    exit 1
+                                }
+
+                                $Rollout = $RolloutRaw | ConvertFrom-Json
+                                $State = Get-Content $StatePath -Raw | ConvertFrom-Json
+
+                                $Phase = [string]$Rollout.status.phase
+                                $PauseCount = @($Rollout.status.pauseConditions).Count
+                                $Checkpoint = [int]$State.current_checkpoint
+                                $CandidateVersion = [string]$State.canary_version
+                                $DesiredPods = [int]$Rollout.spec.replicas
+
+                                $PodsRaw = kubectl get pods `
+                                    -n $Namespace `
+                                    -l "app=$RolloutName" `
+                                    -o json
+
+                                if ($LASTEXITCODE -ne 0) {
+                                    Write-Host "[FAIL] Unable to read application pods at final checkpoint."
+                                    exit 1
+                                }
+
+                                $Pods = ($PodsRaw | ConvertFrom-Json).items
+
+                                $CandidateReady = @(
+                                    $Pods |
+                                    Where-Object {
+                                        $_.metadata.labels.version -eq $CandidateVersion -and
+                                        $_.status.phase -eq "Running" -and
+                                        @(
+                                            $_.status.conditions |
+                                            Where-Object {
+                                                $_.type -eq "Ready" -and
+                                                $_.status -eq "True"
+                                            }
+                                        ).Count -gt 0
+                                    }
+                                ).Count
+
+                                Write-Host (
+                                    "[INFO] Phase={0} Checkpoint={1}% Pause={2} CandidateReady={3}/{4} Elapsed={5}s" -f
+                                    $Phase,
+                                    $Checkpoint,
+                                    $PauseCount,
+                                    $CandidateReady,
+                                    $DesiredPods,
+                                    $Elapsed
+                                )
+
+                                if ($Phase -eq "Degraded") {
+                                    Write-Host "[FAIL] Rollout entered Degraded state before final AI validation."
+                                    exit 1
+                                }
+
+                                if (
+                                    $Phase -eq "Paused" -and
+                                    $Checkpoint -eq 100 -and
+                                    $PauseCount -gt 0 -and
+                                    $CandidateReady -eq $DesiredPods
+                                ) {
+                                    $Reached = $true
+                                    break
+                                }
+
+                                Start-Sleep -Seconds $PollSeconds
+                                $Elapsed += $PollSeconds
+                            }
+
+                            if (-not $Reached) {
+                                Write-Host "[FAIL] 100% Candidate checkpoint was not reached with all Candidate pods Ready."
+                                exit 1
+                            }
+
+                            Write-Host ""
+                            Write-Host "[PASS] 100% Candidate checkpoint reached."
+                            Write-Host "[PASS] Candidate pods Ready: $CandidateReady/$DesiredPods"
+                            Write-Host "[PASS] Rollout remains paused for FINAL AI validation."
+                        '''
+
+                        powershell '''
+                            $Config = Get-Content `
+                                ./jenkins/config/pipeline-config.json `
+                                -Raw |
+                                ConvertFrom-Json
+
+                            $Hold = [int]$Config.demo.deployment_observation_hold_seconds
+
+                            if ($Hold -gt 0) {
+                                Write-Host ""
+                                Write-Host "100% Candidate observation hold: $Hold second(s)"
+                                Start-Sleep -Seconds $Hold
+                            }
+                        '''
+
+                        powershell '''
+                            & ./jenkins/scripts/get-ai-decision.ps1
+                        '''
+
+                        def decision100 = powershell(
+                            returnStdout: true,
+                            script: '''
+                                $Data = Get-Content `
+                                    ./ai-engine/ai_decision.json `
+                                    -Raw |
+                                    ConvertFrom-Json
+
+                                Write-Output (
+                                    ([string]$Data.final_assessment.decision).
+                                    ToUpperInvariant()
+                                )
+                            '''
+                        ).trim()
+
+                        echo "AI decision at 100%: ${decision100}"
+
+                        powershell '''
+                            python ./ai-engine/deployment_controller.py --execute
+
+                            if ($LASTEXITCODE -ne 0) {
+                                exit $LASTEXITCODE
+                            }
+                        '''
+
+                        if (decision100 != 'PROMOTE') {
+                            error(
+                                "Final 100% Candidate checkpoint did not authorize release completion. " +
+                                "AI decision: ${decision100}"
+                            )
+                        }
+
+                        echo 'Final AI PROMOTE approved. Waiting for Candidate to become the new Stable.'
+                    }
+                    else {
+                        echo 'Rollback scenario already completed its AI action at 50%; validating recovered Stable state.'
+                    }
+                }
+
                 powershell '''
                     $Config = Get-Content `
                         ./jenkins/config/pipeline-config.json `

@@ -254,9 +254,17 @@ def render_steps(
         )
 
 
+    # The final weight is also an AI analysis checkpoint.
+    # Argo must pause at 100% Candidate exposure so the final
+    # live telemetry cycle can run before the revision is accepted
+    # as the new Stable.
     lines.append(
         "        - setWeight: "
         f"{scenario['final_weight']}"
+    )
+
+    lines.append(
+        "        - pause: {}"
     )
 
 
@@ -638,6 +646,20 @@ def main():
             f"{scenario['scenario']}"
         )
 
+        analysis_checkpoints = (
+            list(
+                scenario[
+                    "checkpoints"
+                ]
+            )
+            +
+            [
+                scenario[
+                    "final_weight"
+                ]
+            ]
+        )
+
         print(
             "Checkpoints   : "
             +
@@ -647,9 +669,7 @@ def main():
                 )
                 +
                 "%"
-                for item in scenario[
-                    "checkpoints"
-                ]
+                for item in analysis_checkpoints
             )
         )
 

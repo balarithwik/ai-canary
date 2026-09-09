@@ -57,6 +57,9 @@ $PublisherScript = Join-Path $AiDir "ai_metrics_publisher.py"
 $ContextFile = Join-Path $AiDir "ai_risk_context.json"
 $DecisionFile = Join-Path $AiDir "ai_decision.json"
 $MetricsFile = Join-Path $AiDir "ai_metrics.prom"
+$FinalReferenceContext = Join-Path `
+    $ProjectRoot `
+    "runtime\stages\checkpoint-50\ai_risk_context.json"
 
 foreach ($required in @(
     $ConfigPath,
@@ -162,15 +165,51 @@ $CanaryPods = @(
     }
 )
 
-if ($StablePods.Count -lt 1) {
-    Fail "No Running Stable pods found for '$ExpectedStable'."
-}
-
 if ($CanaryPods.Count -lt 1) {
     Fail "No Running Canary pods found for '$ExpectedCanary'."
 }
 
-Write-Host "[PASS] Live rollout is paused with both Stable and Canary active."
+if ($Checkpoint -eq 100) {
+
+    if (-not (Test-Path $FinalReferenceContext)) {
+        Fail (
+            "100% AI validation requires the saved 50% Stable reference: " +
+            "$FinalReferenceContext"
+        )
+    }
+
+    $ReferenceData = Get-Content `
+        $FinalReferenceContext `
+        -Raw |
+        ConvertFrom-Json
+
+    $ReferenceStable = [string]$ReferenceData.deployment.stable_version
+    $ReferenceCanary = [string]$ReferenceData.deployment.canary_version
+
+    if (
+        $ReferenceStable -ne $ExpectedStable -or
+        $ReferenceCanary -ne $ExpectedCanary
+    ) {
+        Fail (
+            "Saved 50% reference versions do not match the final checkpoint. " +
+            "Expected Stable='$ExpectedStable' Canary='$ExpectedCanary'; " +
+            "Reference Stable='$ReferenceStable' Canary='$ReferenceCanary'."
+        )
+    }
+
+    Write-Host "[PASS] Rollout is paused at the 100% Candidate checkpoint."
+    Write-Host "[PASS] Stored 50% Stable telemetry baseline is available."
+    Write-Host "       Stable Running Pods : $($StablePods.Count) (not required at 100%)"
+    Write-Host "       Canary Running Pods : $($CanaryPods.Count)"
+}
+else {
+
+    if ($StablePods.Count -lt 1) {
+        Fail "No Running Stable pods found for '$ExpectedStable'."
+    }
+
+    Write-Host "[PASS] Live rollout is paused with both Stable and Canary active."
+}
 
 # ============================================================
 # VERIFY REQUIRED AI MODEL IS REALLY CONFIGURED IN ENGINE
@@ -245,6 +284,27 @@ foreach ($file in @(
 Write-Host "[PASS] Previous AI cycle output cleared."
 
 # ============================================================
+# FINAL CHECKPOINT REFERENCE MODE
+#
+# At 100% Candidate traffic, there is no live Stable request stream.
+# risk_context.py therefore compares four NEW live Candidate windows
+# with the Stable baseline saved at the 50% checkpoint.
+# ============================================================
+
+if ($Checkpoint -eq 100) {
+    $env:AI_FINAL_CHECKPOINT_MODE = "1"
+    $env:AI_STABLE_REFERENCE_CONTEXT = $FinalReferenceContext
+
+    Write-Host ""
+    Write-Host "[INFO] Final 100% AI checkpoint enabled."
+    Write-Host "[INFO] Stable baseline source: $FinalReferenceContext"
+}
+else {
+    Remove-Item Env:AI_FINAL_CHECKPOINT_MODE -ErrorAction SilentlyContinue
+    Remove-Item Env:AI_STABLE_REFERENCE_CONTEXT -ErrorAction SilentlyContinue
+}
+
+# ============================================================
 # RUN FROM ai-engine DIRECTORY
 #
 # risk_context.py currently writes ai_risk_context.json using a
@@ -301,6 +361,28 @@ try {
     Write-Host "       Valid Windows : $ValidWindows/$TotalWindows"
     Write-Host "       Aggregation   : $($ContextData.data_quality.aggregation_method)"
     Write-Host "       Overall Trend : $($ContextData.overall_trend)"
+
+    if ($Checkpoint -eq 100) {
+
+        $ReferenceMode = [string]$ContextData.data_quality.stable_reference_mode
+        $CanaryWeight = [double]$ContextData.deployment.canary_weight
+
+        if ($ReferenceMode -ne "CHECKPOINT_50_MEDIAN") {
+            Fail (
+                "100% context did not use the required stored Stable baseline. " +
+                "Observed reference mode: '$ReferenceMode'."
+            )
+        }
+
+        if ([math]::Abs($CanaryWeight - 100) -ge 0.01) {
+            Fail (
+                "Final AI cycle must run at 100% Candidate exposure. " +
+                "Observed Canary weight: $CanaryWeight%."
+            )
+        }
+
+        Write-Host "[PASS] Final context uses stored 50% Stable baseline + live 100% Candidate windows."
+    }
 
     # ========================================================
     # 2. AI PRIMARY DECISION ENGINE
