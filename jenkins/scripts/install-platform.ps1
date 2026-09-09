@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$ProjectRoot = ""
 )
 
@@ -282,6 +282,7 @@ spec:
     - port: http
       interval: 5s
       path: /metrics
+      honorLabels: true
 "@
 
 $PushgatewayServiceMonitor |

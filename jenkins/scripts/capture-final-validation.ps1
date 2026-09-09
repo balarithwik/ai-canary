@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$ProjectRoot = ""
 )
 
@@ -78,11 +78,30 @@ $Scenario = [string]$State.scenario
 $OriginalStable = [string]$State.stable_version
 $CandidateVersion = [string]$State.canary_version
 
+# ============================================================
+# DETERMINE EXPECTED FINAL VERSION
+# ============================================================
+
+if ($Scenario -eq "ALL_STAGES_PROMOTE") {
+    $ExpectedFinalVersion = $CandidateVersion
+    $Outcome = "NEW_STABLE_ACTIVE"
+    $RecoveryVerified = "N/A"
+}
+elseif ($Scenario -eq "ROLLBACK_AT_50") {
+    $ExpectedFinalVersion = $OriginalStable
+    $Outcome = "PREVIOUS_STABLE_RESTORED"
+    $RecoveryVerified = $true
+}
+else {
+    Fail "Unsupported scenario '$Scenario'."
+}
+
 Write-Section "FINAL DEPLOYMENT VALIDATION"
 
 Write-Host "Scenario        : $Scenario"
 Write-Host "Original Stable : $OriginalStable"
 Write-Host "Candidate       : $CandidateVersion"
+Write-Host "Expected Final  : $ExpectedFinalVersion"
 
 # ============================================================
 # VERIFY CONTEXT
@@ -131,80 +150,162 @@ if ($RolloutPhase -ne "Healthy") {
 Write-Host "[PASS] Rollout is Healthy."
 
 # ============================================================
-# DISCOVER ACTIVE APPLICATION PODS
+# WAIT FOR FINAL REPLICA CONVERGENCE
+#
+# Argo can report Healthy before old ReplicaSet pods have fully
+# finished scaling down. During that short transition, kubectl
+# may temporarily show more Ready pods than spec.replicas.
+#
+# Final validation therefore waits until:
+#   - expected final version has exactly DesiredPods Ready pods
+#   - no other version has a Ready pod
+#   - total Ready pods equals DesiredPods
 # ============================================================
 
-$PodsRaw = kubectl get pods `
-    -n $Namespace `
-    -l "app=$RolloutName" `
-    -o json
+Write-Section "WAIT FOR FINAL REPLICA CONVERGENCE"
 
-if ($LASTEXITCODE -ne 0) {
-    Fail "Unable to read application pods."
+$ConvergenceTimeoutSeconds = 120
+$PollSeconds = 3
+$Elapsed = 0
+$Converged = $false
+
+$RunningReadyPods = @()
+$ExpectedReadyPods = @()
+$UnexpectedReadyPods = @()
+$ActiveVersions = @()
+
+while ($Elapsed -le $ConvergenceTimeoutSeconds) {
+
+    $PodsRaw = kubectl get pods `
+        -n $Namespace `
+        -l "app=$RolloutName" `
+        -o json
+
+    if ($LASTEXITCODE -ne 0) {
+        Fail "Unable to read application pods during convergence check."
+    }
+
+    $Pods = @((($PodsRaw | ConvertFrom-Json).items))
+
+    $RunningReadyPods = @(
+        $Pods | Where-Object {
+            $_.status.phase -eq "Running" -and
+            (Test-PodReady $_)
+        }
+    )
+
+    $ExpectedReadyPods = @(
+        $RunningReadyPods | Where-Object {
+            [string]$_.metadata.labels.version -eq $ExpectedFinalVersion
+        }
+    )
+
+    $UnexpectedReadyPods = @(
+        $RunningReadyPods | Where-Object {
+            $Version = [string]$_.metadata.labels.version
+            -not [string]::IsNullOrWhiteSpace($Version) -and
+            $Version -ne $ExpectedFinalVersion
+        }
+    )
+
+    $ActiveVersions = @(
+        $RunningReadyPods |
+        ForEach-Object {
+            [string]$_.metadata.labels.version
+        } |
+        Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_)
+        } |
+        Sort-Object -Unique
+    )
+
+    $VersionSummary = if ($ActiveVersions.Count -gt 0) {
+        $ActiveVersions -join ", "
+    }
+    else {
+        "NONE"
+    }
+
+    $StatusLine = (
+        "[INFO] Ready={0}/{1} ExpectedVersionReady={2}/{1} UnexpectedReady={3} Versions=[{4}] Elapsed={5}s" -f
+        $RunningReadyPods.Count,
+        $DesiredPods,
+        $ExpectedReadyPods.Count,
+        $UnexpectedReadyPods.Count,
+        $VersionSummary,
+        $Elapsed
+    )
+
+    Write-Host $StatusLine
+
+    if (
+        $RunningReadyPods.Count -eq $DesiredPods -and
+        $ExpectedReadyPods.Count -eq $DesiredPods -and
+        $UnexpectedReadyPods.Count -eq 0 -and
+        $ActiveVersions.Count -eq 1 -and
+        [string]$ActiveVersions[0] -eq $ExpectedFinalVersion
+    ) {
+        $Converged = $true
+        break
+    }
+
+    if ($Elapsed -ge $ConvergenceTimeoutSeconds) {
+        break
+    }
+
+    Start-Sleep -Seconds $PollSeconds
+    $Elapsed += $PollSeconds
 }
 
-$Pods = ($PodsRaw | ConvertFrom-Json).items
+if (-not $Converged) {
+    $UnexpectedNames = @(
+        $UnexpectedReadyPods | ForEach-Object {
+            $PodName = [string]$_.metadata.name
+            $PodVersion = [string]$_.metadata.labels.version
+            "$PodName($PodVersion)"
+        }
+    )
 
-$RunningReadyPods = @(
-    $Pods | Where-Object {
-        $_.status.phase -eq "Running" -and
-        (Test-PodReady $_)
+    $UnexpectedSummary = if ($UnexpectedNames.Count -gt 0) {
+        $UnexpectedNames -join ", "
     }
-)
+    else {
+        "NONE"
+    }
+
+    Fail (
+        "Final replicas did not converge within $ConvergenceTimeoutSeconds second(s). " +
+        "Expected '$ExpectedFinalVersion' Ready=$DesiredPods, " +
+        "observed ExpectedReady=$($ExpectedReadyPods.Count), " +
+        "TotalReady=$($RunningReadyPods.Count), " +
+        "UnexpectedReady=$($UnexpectedReadyPods.Count). " +
+        "Unexpected pods: $UnexpectedSummary"
+    )
+}
 
 $ReadyPods = $RunningReadyPods.Count
-
-if ($ReadyPods -ne $DesiredPods) {
-    Fail "Expected $DesiredPods Ready pods but found $ReadyPods."
-}
-
-Write-Host "[PASS] Ready Pods: $ReadyPods/$DesiredPods"
-
-$ActiveVersions = @(
-    $RunningReadyPods |
-    ForEach-Object {
-        [string]$_.metadata.labels.version
-    } |
-    Where-Object {
-        -not [string]::IsNullOrWhiteSpace($_)
-    } |
-    Sort-Object -Unique
-)
-
-if ($ActiveVersions.Count -ne 1) {
-    Fail "Expected exactly one final active application version. Found: $($ActiveVersions -join ', ')"
-}
-
 $ActiveVersion = [string]$ActiveVersions[0]
 
+Write-Host ""
+Write-Host "[PASS] Replica convergence completed in $Elapsed second(s)."
+Write-Host "[PASS] Ready Pods: $ReadyPods/$DesiredPods"
 Write-Host "Active Version  : $ActiveVersion"
 
 # ============================================================
 # FINAL VERSION EXPECTATION
 # ============================================================
 
+if ($ActiveVersion -ne $ExpectedFinalVersion) {
+    Fail (
+        "Expected final version '$ExpectedFinalVersion' " +
+        "but active version is '$ActiveVersion'."
+    )
+}
+
 if ($Scenario -eq "ALL_STAGES_PROMOTE") {
-
-    if ($ActiveVersion -ne $CandidateVersion) {
-        Fail (
-            "Promotion scenario expected Candidate '$CandidateVersion' " +
-            "to become the final Stable, but active version is '$ActiveVersion'."
-        )
-    }
-
-    $Outcome = "NEW_STABLE_ACTIVE"
-    $RecoveryVerified = "N/A"
-
     Write-Host "[PASS] Candidate successfully became the final Stable."
 }
 elseif ($Scenario -eq "ROLLBACK_AT_50") {
-
-    if ($ActiveVersion -ne $OriginalStable) {
-        Fail (
-            "Recovery scenario expected previous Stable '$OriginalStable' " +
-            "but active version is '$ActiveVersion'."
-        )
-    }
 
     $RejectedCanaryPods = @(
         $RunningReadyPods |
@@ -217,14 +318,8 @@ elseif ($Scenario -eq "ROLLBACK_AT_50") {
         Fail "Rejected Candidate still has active Ready pods."
     }
 
-    $Outcome = "PREVIOUS_STABLE_RESTORED"
-    $RecoveryVerified = $true
-
     Write-Host "[PASS] Previous Stable restored."
     Write-Host "[PASS] Rejected Candidate is not active."
-}
-else {
-    Fail "Unsupported scenario '$Scenario'."
 }
 
 # ============================================================
@@ -322,29 +417,32 @@ $CanaryActive = $false
 # ============================================================
 
 $Output = [PSCustomObject]@{
-    timestamp               = [DateTimeOffset]::Now.ToString("o")
-    scenario                = $Scenario
+    timestamp                    = [DateTimeOffset]::Now.ToString("o")
+    scenario                     = $Scenario
 
-    rollout_status          = $RolloutPhase
-    outcome                 = $Outcome
+    rollout_status               = $RolloutPhase
+    outcome                      = $Outcome
 
-    original_stable_version = $OriginalStable
-    candidate_version       = $CandidateVersion
-    active_version          = $ActiveVersion
-    final_stable_version    = $ActiveVersion
+    original_stable_version      = $OriginalStable
+    candidate_version            = $CandidateVersion
+    expected_final_version       = $ExpectedFinalVersion
+    active_version               = $ActiveVersion
+    final_stable_version         = $ActiveVersion
 
-    stable_weight           = $StableWeight
-    canary_weight           = $CanaryWeight
-    canary_active           = $CanaryActive
+    stable_weight                = $StableWeight
+    canary_weight                = $CanaryWeight
+    canary_active                = $CanaryActive
 
-    desired_pods            = $DesiredPods
-    ready_pods              = $ReadyPods
+    desired_pods                 = $DesiredPods
+    ready_pods                   = $ReadyPods
+    replica_convergence_verified = $true
+    replica_convergence_seconds  = $Elapsed
 
-    application_health      = "PASS"
-    health_samples          = @($HealthSamples)
+    application_health           = "PASS"
+    health_samples               = @($HealthSamples)
 
-    recovery_verified       = $RecoveryVerified
-    final_state_verified    = $true
+    recovery_verified            = $RecoveryVerified
+    final_state_verified         = $true
 }
 
 $TempPath = "$OutputPath.tmp"
@@ -366,6 +464,7 @@ Write-Host "Final Stable       : $ActiveVersion"
 Write-Host "Stable Traffic     : 100%"
 Write-Host "Canary Traffic     : 0%"
 Write-Host "Ready Pods         : $ReadyPods/$DesiredPods"
+Write-Host "Replica Converged  : YES ($Elapsed second(s))"
 Write-Host "Application Health : PASS"
 Write-Host "Outcome            : $Outcome"
 
