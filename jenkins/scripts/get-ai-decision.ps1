@@ -82,6 +82,8 @@ $RequiredModel = [string]$Config.ai.model
 $WindowCount = [int]$Config.ai.observation_windows
 $WindowInterval = [int]$Config.ai.observation_interval_seconds
 $PushgatewayUrl = [string]$Config.monitoring.pushgateway_url
+$PrometheusPort = [int]$Config.ports.prometheus
+$PrometheusUrl = "http://localhost:$PrometheusPort"
 
 $Checkpoint = [int]$ScenarioState.current_checkpoint
 $ExpectedStable = [string]$ScenarioState.stable_version
@@ -402,7 +404,106 @@ try {
         Fail "Pushgateway is no longer reachable at $PushgatewayUrl."
     }
 
-    Write-Host "[PASS] AI decision metrics published for the existing Grafana dashboard."
+    # ========================================================
+    # VERIFY PROMETHEUS CAN SEE THE FRESH CHECKPOINT METRICS
+    #
+    # Pushgateway HTTP 200 only confirms that the metrics were
+    # accepted by Pushgateway. Grafana reads from Prometheus, so
+    # do not mark the dashboard update as successful until
+    # Prometheus has scraped the current checkpoint values.
+    # ========================================================
+
+    Write-Section "VERIFY DASHBOARD METRICS IN PROMETHEUS"
+
+    $PrometheusWaitSeconds = 45
+    $PrometheusPollSeconds = 3
+    $PrometheusElapsed = 0
+    $MetricsVisible = $false
+    $LastObservedWeight = $null
+
+    while ($PrometheusElapsed -lt $PrometheusWaitSeconds) {
+
+        try {
+            $WeightQuery = 'ai_canary_weight_percent{job="ai-canary-intelligence"}'
+            $DecisionQuery = 'ai_decision_code{job="ai-canary-intelligence"}'
+
+            $WeightUri = (
+                "$PrometheusUrl/api/v1/query?query=" +
+                [uri]::EscapeDataString($WeightQuery)
+            )
+
+            $DecisionUri = (
+                "$PrometheusUrl/api/v1/query?query=" +
+                [uri]::EscapeDataString($DecisionQuery)
+            )
+
+            $WeightResponse = Invoke-RestMethod `
+                -Uri $WeightUri `
+                -Method Get `
+                -TimeoutSec 10
+
+            $DecisionResponse = Invoke-RestMethod `
+                -Uri $DecisionUri `
+                -Method Get `
+                -TimeoutSec 10
+
+            $WeightResults = @(
+                $WeightResponse.data.result
+            )
+
+            $DecisionResults = @(
+                $DecisionResponse.data.result
+            )
+
+            if ($WeightResults.Count -gt 0) {
+                $LastObservedWeight = [double]$WeightResults[0].value[1]
+            }
+
+            if (
+                $WeightResults.Count -gt 0 -and
+                $DecisionResults.Count -gt 0 -and
+                $null -ne $LastObservedWeight -and
+                [math]::Abs($LastObservedWeight - $Checkpoint) -lt 0.01
+            ) {
+                $MetricsVisible = $true
+                break
+            }
+        }
+        catch {
+            # Prometheus may be between scrapes. Keep polling until timeout.
+        }
+
+        Write-Host (
+            "[INFO] Waiting for Prometheus to expose dashboard metrics " +
+            "for checkpoint $Checkpoint%... Elapsed=${PrometheusElapsed}s"
+        )
+
+        Start-Sleep -Seconds $PrometheusPollSeconds
+        $PrometheusElapsed += $PrometheusPollSeconds
+    }
+
+    if (-not $MetricsVisible) {
+
+        $ObservedText = "NONE"
+
+        if ($null -ne $LastObservedWeight) {
+            $ObservedText = "$LastObservedWeight%"
+        }
+
+        Fail (
+            "AI metrics reached Pushgateway, but Prometheus did not expose " +
+            "the current checkpoint within $PrometheusWaitSeconds seconds. " +
+            "Expected Canary weight: $Checkpoint%. " +
+            "Last observed: $ObservedText. " +
+            "Check Pushgateway ServiceMonitor honorLabels and scrape status."
+        )
+    }
+
+    Write-Host "[PASS] Prometheus has current AI dashboard metrics."
+    Write-Host "       Canary Weight : $LastObservedWeight%"
+    Write-Host "       Checkpoint    : $Checkpoint%"
+    Write-Host "       Dashboard Job : ai-canary-intelligence"
+    Write-Host "[PASS] AI decision metrics are available to the existing Grafana dashboard."
 
 }
 finally {
