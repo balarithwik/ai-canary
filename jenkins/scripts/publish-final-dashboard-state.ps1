@@ -155,48 +155,80 @@ else {
 # executed. Therefore we keep every AI intelligence metric exactly
 # as produced by the decision engine and only replace the traffic
 # gauges with the verified final runtime state (100/0).
+#
+# IMPORTANT:
+# Build the outgoing payload line-by-line and normalize it to LF.
+# This avoids PowerShell/Windows newline or body-serialization
+# differences from corrupting the Prometheus exposition format.
 # ============================================================
 
-$MetricText = Get-Content $CheckpointMetricsPath -Raw
+$CheckpointMetricText = Get-Content $CheckpointMetricsPath -Raw
+$MetricLines = @($CheckpointMetricText -split "`r?`n")
 
-$StablePattern = '(?m)^ai_stable_weight_percent\s+[-+0-9.eE]+\s*$'
-$CanaryPattern = '(?m)^ai_canary_weight_percent\s+[-+0-9.eE]+\s*$'
-
-if (-not [regex]::IsMatch($MetricText, $StablePattern)) {
-    Fail "ai_stable_weight_percent was not found in the AI metric payload."
-}
-
-if (-not [regex]::IsMatch($MetricText, $CanaryPattern)) {
-    Fail "ai_canary_weight_percent was not found in the AI metric payload."
-}
-
-$MetricText = [regex]::Replace(
-    $MetricText,
-    $StablePattern,
-    "ai_stable_weight_percent $StableWeight"
-)
-
-$MetricText = [regex]::Replace(
-    $MetricText,
-    $CanaryPattern,
-    "ai_canary_weight_percent $CanaryWeight"
-)
-
-# Refresh only the publication timestamp. The AI analysis timestamp
-# remains untouched because no new AI analysis is being invented here.
+$StableFound = 0
+$CanaryFound = 0
+$PublishedFound = 0
 $PublishedTimestamp = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
-$PublishedPattern = '(?m)^ai_metrics_published_timestamp_seconds\s+[-+0-9.eE]+\s*$'
 
-if ([regex]::IsMatch($MetricText, $PublishedPattern)) {
-    $MetricText = [regex]::Replace(
-        $MetricText,
-        $PublishedPattern,
-        "ai_metrics_published_timestamp_seconds $PublishedTimestamp"
-    )
+for ($i = 0; $i -lt $MetricLines.Count; $i++) {
+
+    $Line = [string]$MetricLines[$i]
+
+    if ($Line -match '^ai_stable_weight_percent[ \t]+[-+0-9.eE]+[ \t]*$') {
+        $MetricLines[$i] = "ai_stable_weight_percent $StableWeight"
+        $StableFound++
+        continue
+    }
+
+    if ($Line -match '^ai_canary_weight_percent[ \t]+[-+0-9.eE]+[ \t]*$') {
+        $MetricLines[$i] = "ai_canary_weight_percent $CanaryWeight"
+        $CanaryFound++
+        continue
+    }
+
+    if ($Line -match '^ai_metrics_published_timestamp_seconds[ \t]+[-+0-9.eE]+[ \t]*$') {
+        $MetricLines[$i] = "ai_metrics_published_timestamp_seconds $PublishedTimestamp"
+        $PublishedFound++
+        continue
+    }
 }
 
-# Store a separate final-state payload so checkpoint evidence remains intact.
-$MetricText | Set-Content -Path $FinalMetricsPath -Encoding UTF8
+if ($StableFound -ne 1) {
+    Fail "Expected exactly one ai_stable_weight_percent sample; found $StableFound."
+}
+
+if ($CanaryFound -ne 1) {
+    Fail "Expected exactly one ai_canary_weight_percent sample; found $CanaryFound."
+}
+
+if ($PublishedFound -gt 1) {
+    Fail "Expected at most one ai_metrics_published_timestamp_seconds sample; found $PublishedFound."
+}
+
+$MetricText = $MetricLines -join "`n"
+
+# Prometheus text exposition should end with a newline. Remove any
+# existing trailing CR/LF characters first, then add exactly one LF.
+while (
+    $MetricText.Length -gt 0 -and
+    (
+        $MetricText.EndsWith("`r") -or
+        $MetricText.EndsWith("`n")
+    )
+) {
+    $MetricText = $MetricText.Substring(0, $MetricText.Length - 1)
+}
+
+$MetricText += "`n"
+
+# Save the final-state payload as UTF-8 WITHOUT BOM. The checkpoint
+# ai_metrics.prom file remains untouched for evidence/reporting.
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+[System.IO.File]::WriteAllText(
+    $FinalMetricsPath,
+    $MetricText,
+    $Utf8NoBom
+)
 
 Write-Host ""
 Write-Host "[PASS] Final dashboard payload prepared:"
@@ -206,6 +238,12 @@ Write-Host "[PASS] Final runtime traffic overridden to 100% Stable / 0% Canary."
 
 # ============================================================
 # PUSH FINAL PAYLOAD
+# ============================================================
+#
+# The normal AI publisher uses raw UTF-8 bytes through Python and
+# Pushgateway accepts that payload. For Final Validation, use the
+# equivalent raw .NET request stream rather than Invoke-WebRequest
+# -Body byte[] so Windows PowerShell cannot reinterpret the body.
 # ============================================================
 
 try {
@@ -218,21 +256,80 @@ catch {
     Fail "Pushgateway is not reachable at $PushgatewayUrl."
 }
 
+$Request = $null
+$RequestStream = $null
+$HttpResponse = $null
+
 try {
-    $BodyBytes = [System.Text.Encoding]::UTF8.GetBytes($MetricText)
+    $BodyBytes = $Utf8NoBom.GetBytes($MetricText)
 
-    $Response = Invoke-WebRequest `
-        -Uri $PushUrl `
-        -Method Put `
-        -Body $BodyBytes `
-        -ContentType "text/plain; version=0.0.4" `
-        -UseBasicParsing `
-        -TimeoutSec 15
+    $Request = [System.Net.HttpWebRequest]::Create($PushUrl)
+    $Request.Method = "PUT"
+    $Request.ContentType = "text/plain; version=0.0.4"
+    $Request.ContentLength = $BodyBytes.Length
+    $Request.Timeout = 15000
+    $Request.ReadWriteTimeout = 15000
 
-    Write-Host "[PASS] Pushgateway accepted final dashboard state. HTTP $($Response.StatusCode)"
+    $RequestStream = $Request.GetRequestStream()
+    $RequestStream.Write($BodyBytes, 0, $BodyBytes.Length)
+    $RequestStream.Flush()
+    $RequestStream.Close()
+    $RequestStream = $null
+
+    $HttpResponse = [System.Net.HttpWebResponse]$Request.GetResponse()
+    $StatusCode = [int]$HttpResponse.StatusCode
+    $HttpResponse.Close()
+    $HttpResponse = $null
+
+    if ($StatusCode -lt 200 -or $StatusCode -ge 300) {
+        Fail "Pushgateway returned HTTP $StatusCode while publishing final dashboard state."
+    }
+
+    Write-Host "[PASS] Pushgateway accepted final dashboard state. HTTP $StatusCode"
+    Write-Host "       Payload Bytes : $($BodyBytes.Length)"
 }
 catch {
-    Fail "Unable to publish final dashboard state to Pushgateway: $($_.Exception.Message)"
+
+    if ($null -ne $RequestStream) {
+        try { $RequestStream.Close() } catch {}
+    }
+
+    if ($null -ne $HttpResponse) {
+        try { $HttpResponse.Close() } catch {}
+    }
+
+    $ResponseBody = ""
+    $StatusDetail = ""
+
+    try {
+        if ($null -ne $_.Exception.Response) {
+            $ErrorResponse = [System.Net.HttpWebResponse]$_.Exception.Response
+            $StatusDetail = "HTTP $([int]$ErrorResponse.StatusCode) $($ErrorResponse.StatusDescription)"
+
+            $Reader = New-Object System.IO.StreamReader(
+                $ErrorResponse.GetResponseStream()
+            )
+            $ResponseBody = $Reader.ReadToEnd().Trim()
+            $Reader.Close()
+            $ErrorResponse.Close()
+        }
+    }
+    catch {
+        # Preserve the original publishing error if the response
+        # body itself cannot be read.
+    }
+
+    $FailureMessage = "Unable to publish final dashboard state to Pushgateway: $($_.Exception.Message)"
+
+    if (-not [string]::IsNullOrWhiteSpace($StatusDetail)) {
+        $FailureMessage += " [$StatusDetail]"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ResponseBody)) {
+        $FailureMessage += " Pushgateway response: $ResponseBody"
+    }
+
+    Fail $FailureMessage
 }
 
 # ============================================================
