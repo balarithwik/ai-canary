@@ -1,8 +1,26 @@
 import json
 import re
+import sys
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+# ============================================================
+# WINDOWS / JENKINS CONSOLE SAFETY
+# ============================================================
+#
+# Jenkins running as a Windows service can expose a cp1252 console encoding.
+# AI-generated text may contain Unicode characters such as ≈, arrows, or
+# typographic punctuation. Keep the current console encoding, but replace any
+# character it cannot represent instead of allowing Python print() to crash.
+# JSON files are still written separately as UTF-8 and remain unchanged.
+#
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 
 # ============================================================
