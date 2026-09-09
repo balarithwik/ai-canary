@@ -133,28 +133,53 @@ if ($Scenario -eq "ALL_STAGES_PROMOTE") {
     if ($Decision -ne "PROMOTE") {
         Fail "Promote scenario reached final validation with AI decision '$Decision'."
     }
+
+    # For the promote demo, Grafana should preserve the FINAL AI
+    # decision checkpoint view: the Candidate carried 100% traffic
+    # when AI approved PROMOTE. Kubernetes subsequently rebases that
+    # same revision into the Stable role, but the dashboard is meant
+    # to show the decision state that AI evaluated.
+    $DashboardStableWeight = 0
+    $DashboardCanaryWeight = 100
+    $DashboardStateLabel = "FINAL 100% CANDIDATE AI CHECKPOINT"
 }
 elseif ($Scenario -eq "ROLLBACK_AT_50") {
     if ($Decision -ne "ROLLBACK") {
         Fail "Rollback scenario reached final validation with AI decision '$Decision'."
     }
+
+    # For rollback, Grafana should show the executed recovery state
+    # after the rejected Candidate is removed and previous Stable is
+    # restored. This is the already validated 100/0 behavior.
+    $DashboardStableWeight = 100
+    $DashboardCanaryWeight = 0
+    $DashboardStateLabel = "POST-ROLLBACK RECOVERY STATE"
 }
 else {
     Fail "Unsupported scenario '$Scenario'."
 }
 
+Write-Host ""
+Write-Host "Dashboard View  : $DashboardStateLabel"
+Write-Host "Dashboard Stable: $DashboardStableWeight%"
+Write-Host "Dashboard Canary: $DashboardCanaryWeight%"
+
 # ============================================================
-# PRESERVE THE LAST AI ANALYSIS, UPDATE ONLY EXECUTED TRAFFIC
+# PRESERVE THE LAST AI ANALYSIS, APPLY SCENARIO-SPECIFIC VIEW
 # ============================================================
 #
 # ai_metrics.prom is the last AI checkpoint payload. It contains
 # the AI decision, risk, confidence, findings-derived metrics and
 # the checkpoint's multi-window live telemetry history summary.
 #
-# Final Validation occurs AFTER that AI-approved action has been
-# executed. Therefore we keep every AI intelligence metric exactly
-# as produced by the decision engine and only replace the traffic
-# gauges with the verified final runtime state (100/0).
+# ALL_STAGES_PROMOTE:
+#   Keep the final AI checkpoint view at 0% Stable / 100% Candidate
+#   so Grafana continues to show the exact state AI validated before
+#   issuing the final PROMOTE decision.
+#
+# ROLLBACK_AT_50:
+#   Update only the traffic gauges to the verified recovery state of
+#   100% previous Stable / 0% rejected Candidate.
 #
 # IMPORTANT:
 # Build the outgoing payload line-by-line and normalize it to LF.
@@ -175,13 +200,13 @@ for ($i = 0; $i -lt $MetricLines.Count; $i++) {
     $Line = [string]$MetricLines[$i]
 
     if ($Line -match '^ai_stable_weight_percent[ \t]+[-+0-9.eE]+[ \t]*$') {
-        $MetricLines[$i] = "ai_stable_weight_percent $StableWeight"
+        $MetricLines[$i] = "ai_stable_weight_percent $DashboardStableWeight"
         $StableFound++
         continue
     }
 
     if ($Line -match '^ai_canary_weight_percent[ \t]+[-+0-9.eE]+[ \t]*$') {
-        $MetricLines[$i] = "ai_canary_weight_percent $CanaryWeight"
+        $MetricLines[$i] = "ai_canary_weight_percent $DashboardCanaryWeight"
         $CanaryFound++
         continue
     }
@@ -234,7 +259,12 @@ Write-Host ""
 Write-Host "[PASS] Final dashboard payload prepared:"
 Write-Host "       $FinalMetricsPath"
 Write-Host "[PASS] AI decision/risk metrics preserved from the last AI checkpoint."
-Write-Host "[PASS] Final runtime traffic overridden to 100% Stable / 0% Canary."
+if ($Scenario -eq "ALL_STAGES_PROMOTE") {
+    Write-Host "[PASS] Final dashboard preserved at 0% Stable / 100% Candidate for the AI PROMOTE checkpoint."
+}
+else {
+    Write-Host "[PASS] Final rollback dashboard updated to 100% Stable / 0% Canary."
+}
 
 # ============================================================
 # PUSH FINAL PAYLOAD
@@ -361,8 +391,8 @@ while ($Elapsed -le $WaitSeconds) {
         $null -ne $LastStable -and
         $null -ne $LastCanary -and
         $null -ne $LastDecision -and
-        [math]::Abs($LastStable - 100.0) -lt 0.01 -and
-        [math]::Abs($LastCanary - 0.0) -lt 0.01 -and
+        [math]::Abs($LastStable - [double]$DashboardStableWeight) -lt 0.01 -and
+        [math]::Abs($LastCanary - [double]$DashboardCanaryWeight) -lt 0.01 -and
         [math]::Abs($LastDecision - $ExpectedDecisionValue) -lt 0.01
     ) {
         $Verified = $true
@@ -381,19 +411,24 @@ while ($Elapsed -le $WaitSeconds) {
 if (-not $Verified) {
     Fail (
         "Prometheus did not expose the verified final dashboard state within $WaitSeconds seconds. " +
-        "Expected Stable=100 Canary=0 Decision=$Decision(1); " +
+        "Expected Stable=$DashboardStableWeight Canary=$DashboardCanaryWeight Decision=$Decision(1); " +
         "observed Stable=$LastStable Canary=$LastCanary Decision=$LastDecision."
     )
 }
 
 Write-Host "[PASS] Prometheus now exposes the verified final dashboard state."
-Write-Host "       Stable Traffic : 100%"
-Write-Host "       Canary Traffic : 0%"
+Write-Host "       Stable Traffic : $DashboardStableWeight%"
+Write-Host "       Canary Traffic : $DashboardCanaryWeight%"
 Write-Host "       AI Decision    : $Decision"
 Write-Host "       Decision Source: $DecisionSource"
 Write-Host ""
 Write-Host "Grafana refreshes every $($Config.monitoring.grafana_refresh_seconds) second(s)."
-Write-Host "The final dashboard hold will now show the executed deployment state."
+if ($Scenario -eq "ALL_STAGES_PROMOTE") {
+    Write-Host "The final dashboard hold will preserve the 100% Candidate AI PROMOTE checkpoint."
+}
+else {
+    Write-Host "The final dashboard hold will show the verified rollback recovery state."
+}
 Write-Host ""
 
 exit 0
