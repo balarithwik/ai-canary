@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ProjectRoot = ""
 )
 
@@ -330,7 +330,7 @@ $RequiredFiles = @(
     "kubernetes\servicemonitor.yaml",
     "kubernetes\ai-pushgateway-servicemonitor.yaml",
     "scenarios\promote-all.json",
-    "scenarios\rollback-at-80.json",
+    "scenarios\rollback-at-50.json",
     "jenkins\config\pipeline-config.json"
 )
 
@@ -427,3 +427,4 @@ Write-Host "Jenkins agent is ready for the AI Canary demo."
 Write-Host "No Kubernetes cluster is required at this stage."
 
 exit 0
+
