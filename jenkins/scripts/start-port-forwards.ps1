@@ -439,37 +439,78 @@ $PrometheusBase = "http://localhost:$PrometheusPort"
 
 $TargetQuery = 'up{namespace="ai-canary",service="ai-canary-demo"}'
 
-$TargetResponse = Invoke-RestMethod `
-    -Uri (
-        "$PrometheusBase/api/v1/query?query=" +
-        [uri]::EscapeDataString($TargetQuery)
-    ) `
-    -Method Get `
-    -TimeoutSec 15
+# The ServiceMonitor is created shortly before this stage. Prometheus Operator
+# reconciliation and the first scrape are asynchronous, so do not fail on the
+# first empty query. Wait for the target to be discovered and report UP.
+$TargetTimeoutSeconds = 90
+$TargetElapsed = 0
+$TargetReady = $false
+$TargetDiscovered = $false
 
-if ($TargetResponse.status -ne "success") {
-    Fail "Prometheus target query failed."
+while ($TargetElapsed -lt $TargetTimeoutSeconds) {
+
+    $TargetResponse = Invoke-RestMethod `
+        -Uri (
+            "$PrometheusBase/api/v1/query?query=" +
+            [uri]::EscapeDataString($TargetQuery)
+        ) `
+        -Method Get `
+        -TimeoutSec 15
+
+    if ($TargetResponse.status -ne "success") {
+        Fail "Prometheus target query failed."
+    }
+
+    $UpValues = @(
+        $TargetResponse.data.result |
+        ForEach-Object {
+            [double]$_.value[1]
+        }
+    )
+
+    if ($UpValues.Count -gt 0) {
+
+        $TargetDiscovered = $true
+        $MaxUp = ($UpValues | Measure-Object -Maximum).Maximum
+
+        if ($MaxUp -ge 1) {
+            $TargetReady = $true
+            break
+        }
+
+        Write-Host (
+            "[INFO] ai-canary-demo target discovered but not UP yet. " +
+            "Elapsed=${TargetElapsed}s"
+        )
+    }
+    else {
+        Write-Host (
+            "[INFO] Waiting for Prometheus to discover ai-canary-demo... " +
+            "Elapsed=${TargetElapsed}s"
+        )
+    }
+
+    Start-Sleep -Seconds 5
+    $TargetElapsed += 5
 }
 
-$UpValues = @(
-    $TargetResponse.data.result |
-    ForEach-Object {
-        [double]$_.value[1]
-    }
-)
+if (-not $TargetReady) {
 
-if ($UpValues.Count -eq 0) {
+    if ($TargetDiscovered) {
+        Fail (
+            "Prometheus discovered ai-canary-demo, but the target did not become UP " +
+            "within $TargetTimeoutSeconds seconds."
+        )
+    }
+
     Fail (
-        "Prometheus has not discovered the ai-canary-demo ServiceMonitor target yet. " +
-        "Wait a few seconds and rerun this script."
+        "Prometheus did not discover the ai-canary-demo ServiceMonitor target " +
+        "within $TargetTimeoutSeconds seconds."
     )
 }
 
-if (($UpValues | Measure-Object -Maximum).Maximum -lt 1) {
-    Fail "Prometheus discovered ai-canary-demo but the target is DOWN."
-}
-
 Write-Host "[PASS] Prometheus is scraping ai-canary-demo."
+Write-Host "       Target ready after : $TargetElapsed second(s)"
 
 # ServiceMonitor target labels can conflict with an application metric
 # label named "endpoint". With honorLabels=true the application label is
