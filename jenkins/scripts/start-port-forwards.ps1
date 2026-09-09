@@ -188,12 +188,53 @@ foreach ($port in @(
 # ============================================================
 # START PORT-FORWARDS
 # ============================================================
+#
+# IMPORTANT - JENKINS / WINDOWS
+#
+# Long-running kubectl processes are created through Win32_Process.Create
+# instead of Start-Process. This keeps them outside the Jenkins PowerShell
+# durable-task process tree so the Pipeline step can finish normally.
+#
+# kubectl and kubeconfig are passed by absolute path so the detached process
+# does not depend on the Jenkins child-process environment.
+# ============================================================
+
+try {
+    $KubectlCommand = Get-Command "kubectl.exe" -ErrorAction Stop
+    $KubectlPath = [string]$KubectlCommand.Source
+}
+catch {
+    Fail "kubectl.exe could not be resolved."
+}
+
+if ([string]::IsNullOrWhiteSpace($KubectlPath)) {
+    Fail "kubectl.exe path could not be resolved."
+}
+
+$KubeConfigPath = [string]$env:KUBECONFIG
+
+if ([string]::IsNullOrWhiteSpace($KubeConfigPath)) {
+    Fail (
+        "KUBECONFIG is not set. " +
+        "Configure Jenkins KUBECONFIG before starting monitoring port-forwards."
+    )
+}
+
+if (-not (Test-Path $KubeConfigPath)) {
+    Fail "Kubeconfig file not found: $KubeConfigPath"
+}
+
+$KubeConfigPath = (Resolve-Path $KubeConfigPath).Path
+
+Write-Host "[INFO] kubectl    : $KubectlPath"
+Write-Host "[INFO] KUBECONFIG : $KubeConfigPath"
 
 $Definitions = @(
     @{
         Name = "Prometheus"
         Resource = $PrometheusService
         Mapping = "${PrometheusPort}:9090"
+        LocalPort = $PrometheusPort
         OutLog = Join-Path $LogDir "port-forward-prometheus.out.log"
         ErrLog = Join-Path $LogDir "port-forward-prometheus.err.log"
     },
@@ -201,6 +242,7 @@ $Definitions = @(
         Name = "Grafana"
         Resource = $GrafanaService
         Mapping = "${GrafanaPort}:80"
+        LocalPort = $GrafanaPort
         OutLog = Join-Path $LogDir "port-forward-grafana.out.log"
         ErrLog = Join-Path $LogDir "port-forward-grafana.err.log"
     },
@@ -208,6 +250,7 @@ $Definitions = @(
         Name = "Pushgateway"
         Resource = $PushgatewayService
         Mapping = "${PushgatewayPort}:9091"
+        LocalPort = $PushgatewayPort
         OutLog = Join-Path $LogDir "port-forward-pushgateway.out.log"
         ErrLog = Join-Path $LogDir "port-forward-pushgateway.err.log"
     }
@@ -220,91 +263,153 @@ foreach ($definition in $Definitions) {
     Remove-Item $definition.OutLog -Force -ErrorAction SilentlyContinue
     Remove-Item $definition.ErrLog -Force -ErrorAction SilentlyContinue
 
-    $arguments = @(
-        "port-forward",
-        "-n",
-        $MonitoringNamespace,
-        $definition.Resource,
-        $definition.Mapping,
-        "--address",
-        "127.0.0.1"
+    $SafeName = (
+        [string]$definition.Name
+    ) -replace '[^A-Za-z0-9_-]', '-'
+
+    $LauncherPath = Join-Path `
+        $RuntimeDir `
+        ("port-forward-{0}.cmd" -f $SafeName.ToLowerInvariant())
+
+    $LauncherContent = @"
+@echo off
+"$KubectlPath" --kubeconfig "$KubeConfigPath" port-forward -n "$MonitoringNamespace" "$($definition.Resource)" "$($definition.Mapping)" --address 127.0.0.1 1>>"$($definition.OutLog)" 2>>"$($definition.ErrLog)"
+"@
+
+    Set-Content `
+        -Path $LauncherPath `
+        -Value $LauncherContent `
+        -Encoding ASCII
+
+    $CommandLine = (
+        'cmd.exe /d /s /c ""{0}""' -f $LauncherPath
     )
 
-    # Detach long-running port-forward processes from both the Jenkins
-    # Pipeline node process tree and Durable Task process tracking.
-    #
-    # Jenkins Pipeline uses JENKINS_NODE_COOKIE for node process tracking,
-    # while Durable Task uses JENKINS_SERVER_COOKIE for the running step.
-    # Give the port-forward child process different cookie values, then restore
-    # the Jenkins PowerShell process environment immediately after launch.
-    $OriginalJenkinsNodeCookie = $env:JENKINS_NODE_COOKIE
-    $OriginalJenkinsServerCookie = $env:JENKINS_SERVER_COOKIE
-
     try {
-
-        $SafeName = (
-            [string]$definition.Name
-        ) -replace '[^A-Za-z0-9_-]', '-'
-
-        $DetachedCookie = (
-            "ai-canary-port-forward-" +
-            $SafeName +
-            "-" +
-            [guid]::NewGuid().ToString("N")
-        )
-
-        $env:JENKINS_NODE_COOKIE = $DetachedCookie
-        $env:JENKINS_SERVER_COOKIE = $DetachedCookie
-
-        $process = Start-Process `
-            -FilePath "kubectl.exe" `
-            -ArgumentList $arguments `
-            -WindowStyle Hidden `
-            -RedirectStandardOutput $definition.OutLog `
-            -RedirectStandardError $definition.ErrLog `
-            -PassThru
+        $CreateResult = Invoke-CimMethod `
+            -ClassName Win32_Process `
+            -MethodName Create `
+            -Arguments @{
+                CommandLine = $CommandLine
+            } `
+            -ErrorAction Stop
     }
-    finally {
+    catch {
+        Fail (
+            "Unable to create detached $($definition.Name) port-forward process. " +
+            $_.Exception.Message
+        )
+    }
 
-        if ($null -eq $OriginalJenkinsNodeCookie) {
-            Remove-Item Env:JENKINS_NODE_COOKIE `
-                -ErrorAction SilentlyContinue
-        }
-        else {
-            $env:JENKINS_NODE_COOKIE = $OriginalJenkinsNodeCookie
+    if ([int]$CreateResult.ReturnValue -ne 0) {
+        Fail (
+            "Windows process creation failed for $($definition.Name). " +
+            "Win32_Process.Create return value: $($CreateResult.ReturnValue)"
+        )
+    }
+
+    $LauncherPid = [int]$CreateResult.ProcessId
+
+    Write-Host (
+        "[INFO] Detached launcher created for $($definition.Name) " +
+        "(PID $LauncherPid)"
+    )
+
+    $PortForwardPid = $null
+    $ListenElapsed = 0
+    $ListenTimeoutSeconds = 30
+
+    while ($ListenElapsed -lt $ListenTimeoutSeconds) {
+
+        $Listener = Get-NetTCPConnection `
+            -LocalPort ([int]$definition.LocalPort) `
+            -State Listen `
+            -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.LocalAddress -eq "127.0.0.1" -or
+                $_.LocalAddress -eq "0.0.0.0" -or
+                $_.LocalAddress -eq "::"
+            } |
+            Select-Object -First 1
+
+        if ($Listener) {
+            $PortForwardPid = [int]$Listener.OwningProcess
+            break
         }
 
-        if ($null -eq $OriginalJenkinsServerCookie) {
-            Remove-Item Env:JENKINS_SERVER_COOKIE `
-                -ErrorAction SilentlyContinue
+        $LauncherProcess = Get-Process `
+            -Id $LauncherPid `
+            -ErrorAction SilentlyContinue
+
+        if (-not $LauncherProcess) {
+
+            $ErrorTail = ""
+
+            if (Test-Path $definition.ErrLog) {
+                $ErrorTail = (
+                    Get-Content $definition.ErrLog `
+                        -Tail 20 `
+                        -ErrorAction SilentlyContinue
+                ) -join " "
+            }
+
+            Fail (
+                "$($definition.Name) detached launcher exited before port " +
+                "$($definition.LocalPort) became ready. $ErrorTail"
+            )
         }
-        else {
-            $env:JENKINS_SERVER_COOKIE = $OriginalJenkinsServerCookie
+
+        Start-Sleep -Seconds 1
+        $ListenElapsed += 1
+    }
+
+    if ($null -eq $PortForwardPid) {
+
+        $ErrorTail = ""
+
+        if (Test-Path $definition.ErrLog) {
+            $ErrorTail = (
+                Get-Content $definition.ErrLog `
+                    -Tail 20 `
+                    -ErrorAction SilentlyContinue
+            ) -join " "
         }
+
+        Fail (
+            "$($definition.Name) port-forward did not listen on local port " +
+            "$($definition.LocalPort) within $ListenTimeoutSeconds seconds. " +
+            $ErrorTail
+        )
     }
 
     $Processes += [ordered]@{
         name = $definition.Name
-        pid = $process.Id
+        pid = $PortForwardPid
+        launcher_pid = $LauncherPid
         resource = $definition.Resource
         mapping = $definition.Mapping
+        local_port = [int]$definition.LocalPort
+        launcher = $LauncherPath
         started_at = (Get-Date).ToString("o")
     }
 
-    Write-Host "[INFO] Started $($definition.Name) port-forward PID $($process.Id)"
-}
+    $State = [ordered]@{
+        active = $true
+        namespace = $MonitoringNamespace
+        processes = $Processes
+    }
 
-$State = [ordered]@{
-    active = $true
-    namespace = $MonitoringNamespace
-    processes = $Processes
-}
+    $State |
+        ConvertTo-Json -Depth 8 |
+        Set-Content `
+            -Path $PidFile `
+            -Encoding UTF8
 
-$State |
-    ConvertTo-Json -Depth 8 |
-    Set-Content `
-        -Path $PidFile `
-        -Encoding UTF8
+    Write-Host (
+        "[INFO] Started $($definition.Name) port-forward " +
+        "PID $PortForwardPid (detached launcher PID $LauncherPid)"
+    )
+}
 
 # ============================================================
 # VERIFY LOCAL ENDPOINTS
