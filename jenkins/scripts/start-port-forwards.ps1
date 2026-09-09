@@ -230,41 +230,58 @@ foreach ($definition in $Definitions) {
         "127.0.0.1"
     )
 
-    # Detach long-running port-forward processes from the Jenkins
-# Pipeline durable-task process tree.
-$OriginalJenkinsNodeCookie = $env:JENKINS_NODE_COOKIE
+    # Detach long-running port-forward processes from both the Jenkins
+    # Pipeline node process tree and Durable Task process tracking.
+    #
+    # Jenkins Pipeline uses JENKINS_NODE_COOKIE for node process tracking,
+    # while Durable Task uses JENKINS_SERVER_COOKIE for the running step.
+    # Give the port-forward child process different cookie values, then restore
+    # the Jenkins PowerShell process environment immediately after launch.
+    $OriginalJenkinsNodeCookie = $env:JENKINS_NODE_COOKIE
+    $OriginalJenkinsServerCookie = $env:JENKINS_SERVER_COOKIE
 
-try {
+    try {
 
-    $SafeName = (
-        [string]$definition.Name
-    ) -replace '[^A-Za-z0-9_-]', '-'
+        $SafeName = (
+            [string]$definition.Name
+        ) -replace '[^A-Za-z0-9_-]', '-'
 
-    $env:JENKINS_NODE_COOKIE = (
-        "ai-canary-port-forward-" +
-        $SafeName +
-        "-" +
-        [guid]::NewGuid().ToString("N")
-    )
+        $DetachedCookie = (
+            "ai-canary-port-forward-" +
+            $SafeName +
+            "-" +
+            [guid]::NewGuid().ToString("N")
+        )
 
-    $process = Start-Process `
-        -FilePath "kubectl.exe" `
-        -ArgumentList $arguments `
-        -WindowStyle Hidden `
-        -RedirectStandardOutput $definition.OutLog `
-        -RedirectStandardError $definition.ErrLog `
-        -PassThru
-}
-finally {
+        $env:JENKINS_NODE_COOKIE = $DetachedCookie
+        $env:JENKINS_SERVER_COOKIE = $DetachedCookie
 
-    if ($null -eq $OriginalJenkinsNodeCookie) {
-        Remove-Item Env:JENKINS_NODE_COOKIE `
-            -ErrorAction SilentlyContinue
+        $process = Start-Process `
+            -FilePath "kubectl.exe" `
+            -ArgumentList $arguments `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $definition.OutLog `
+            -RedirectStandardError $definition.ErrLog `
+            -PassThru
     }
-    else {
-        $env:JENKINS_NODE_COOKIE = $OriginalJenkinsNodeCookie
+    finally {
+
+        if ($null -eq $OriginalJenkinsNodeCookie) {
+            Remove-Item Env:JENKINS_NODE_COOKIE `
+                -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:JENKINS_NODE_COOKIE = $OriginalJenkinsNodeCookie
+        }
+
+        if ($null -eq $OriginalJenkinsServerCookie) {
+            Remove-Item Env:JENKINS_SERVER_COOKIE `
+                -ErrorAction SilentlyContinue
+        }
+        else {
+            $env:JENKINS_SERVER_COOKIE = $OriginalJenkinsServerCookie
+        }
     }
-}
 
     $Processes += [ordered]@{
         name = $definition.Name
