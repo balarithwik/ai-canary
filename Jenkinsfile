@@ -1,4 +1,4 @@
-﻿pipeline {
+pipeline {
 
     agent any
 
@@ -60,7 +60,7 @@
                     def preCleanupCode = powershell(
                         returnStatus: true,
                         script: '''
-                            & .\jenkins\scripts\cleanup-environment.ps1
+                            & ./jenkins/scripts/cleanup-environment.ps1
                         '''
                     )
 
@@ -70,15 +70,15 @@
                 }
 
                 powershell '''
-                    if (Test-Path .\runtime) {
-                        Remove-Item .\runtime -Recurse -Force
+                    if (Test-Path ./runtime) {
+                        Remove-Item ./runtime -Recurse -Force
                     }
 
                     foreach ($file in @(
-                        ".\ai-engine\ai_decision.json",
-                        ".\ai-engine\ai_risk_context.json",
-                        ".\ai-engine\ai_metrics.prom",
-                        ".\ai-engine\ai_test.prom"
+                        "./ai-engine/ai_decision.json",
+                        "./ai-engine/ai_risk_context.json",
+                        "./ai-engine/ai_metrics.prom",
+                        "./ai-engine/ai_test.prom"
                     )) {
                         if (Test-Path $file) {
                             Remove-Item $file -Force
@@ -89,17 +89,17 @@
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "Environment Setup" `
                         -Action START
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\validate-environment.ps1
+                    & ./jenkins/scripts/validate-environment.ps1
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\create-cluster.ps1 `
+                    & ./jenkins/scripts/create-cluster.ps1 `
                         -RecreateExisting
                 '''
             }
@@ -111,7 +111,7 @@
                         def rc = powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Environment Setup" `
                                     -Action END `
                                     -Status SUCCESS
@@ -129,7 +129,7 @@
                         def rc = powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Environment Setup" `
                                     -Action END `
                                     -Status FAILED
@@ -147,7 +147,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Environment Setup" `
                                     -Action END `
                                     -Status ABORTED
@@ -167,13 +167,13 @@
             steps {
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "Platform Setup" `
                         -Action START
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\install-platform.ps1
+                    & ./jenkins/scripts/install-platform.ps1
                 '''
 
                 powershell '''
@@ -185,7 +185,7 @@
 
                     Write-Host "Jenkins Build ID : $BuildId"
 
-                    & .\jenkins\scripts\load-images.ps1 `
+                    & ./jenkins/scripts/load-images.ps1 `
                         -BuildId $BuildId
                 '''
             }
@@ -197,7 +197,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Platform Setup" `
                                     -Action END `
                                     -Status SUCCESS
@@ -211,7 +211,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Platform Setup" `
                                     -Action END `
                                     -Status FAILED
@@ -225,7 +225,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Platform Setup" `
                                     -Action END `
                                     -Status ABORTED
@@ -245,22 +245,22 @@
             steps {
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "Stable Baseline" `
                         -Action START
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\deploy-stable.ps1
+                    & ./jenkins/scripts/deploy-stable.ps1
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\start-traffic.ps1
+                    & ./jenkins/scripts/start-traffic.ps1
                 '''
 
                 powershell '''
                     $Config = Get-Content `
-                        .\jenkins\config\pipeline-config.json `
+                        ./jenkins/config/pipeline-config.json `
                         -Raw |
                         ConvertFrom-Json
 
@@ -280,7 +280,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Stable Baseline" `
                                     -Action END `
                                     -Status SUCCESS
@@ -294,7 +294,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Stable Baseline" `
                                     -Action END `
                                     -Status FAILED
@@ -308,7 +308,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Stable Baseline" `
                                     -Action END `
                                     -Status ABORTED
@@ -328,21 +328,21 @@
             steps {
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "Monitoring Dashboard" `
                         -Action START
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\start-port-forwards.ps1
+                    & ./jenkins/scripts/start-port-forwards.ps1
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\publish-grafana-dashboard.ps1
+                    & ./jenkins/scripts/publish-grafana-dashboard.ps1
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\open-monitoring-dashboard.ps1
+                    & ./jenkins/scripts/open-monitoring-dashboard.ps1
                 '''
             }
 
@@ -353,7 +353,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Monitoring Dashboard" `
                                     -Action END `
                                     -Status SUCCESS
@@ -367,7 +367,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Monitoring Dashboard" `
                                     -Action END `
                                     -Status FAILED
@@ -381,7 +381,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Monitoring Dashboard" `
                                     -Action END `
                                     -Status ABORTED
@@ -401,7 +401,7 @@
             steps {
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "20% Canary Stage" `
                         -Action START
                 '''
@@ -409,13 +409,13 @@
                 powershell '''
                     Write-Host "Selected Scenario : $env:DEMO_SCENARIO"
 
-                    & .\jenkins\scripts\deploy-canary.ps1 `
+                    & ./jenkins/scripts/deploy-canary.ps1 `
                         -Scenario $env:DEMO_SCENARIO
                 '''
 
                 powershell '''
                     $Config = Get-Content `
-                        .\jenkins\config\pipeline-config.json `
+                        ./jenkins/config/pipeline-config.json `
                         -Raw |
                         ConvertFrom-Json
 
@@ -429,7 +429,7 @@
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\get-ai-decision.ps1
+                    & ./jenkins/scripts/get-ai-decision.ps1
                 '''
 
                 script {
@@ -438,7 +438,7 @@
                         returnStdout: true,
                         script: '''
                             $Data = Get-Content `
-                                .\ai-engine\ai_decision.json `
+                                ./ai-engine/ai_decision.json `
                                 -Raw |
                                 ConvertFrom-Json
 
@@ -454,7 +454,7 @@
                     if (decision20 != 'PROMOTE') {
 
                         powershell '''
-                            python .\ai-engine\deployment_controller.py --execute
+                            python ./ai-engine/deployment_controller.py --execute
 
                             if ($LASTEXITCODE -ne 0) {
                                 exit $LASTEXITCODE
@@ -470,14 +470,14 @@
 
                 powershell '''
                     $Config = Get-Content `
-                        .\jenkins\config\pipeline-config.json `
+                        ./jenkins/config/pipeline-config.json `
                         -Raw |
                         ConvertFrom-Json
 
                     $Namespace = [string]$Config.project.namespace
                     $RolloutName = [string]$Config.project.rollout_name
 
-                    $StatePath = ".\runtime\scenario-state.json"
+                    $StatePath = "./runtime/scenario-state.json"
 
                     if (-not (Test-Path $StatePath)) {
                         Write-Host "[FAIL] scenario-state.json not found."
@@ -500,7 +500,7 @@
                     Write-Host "Current Argo Step : $OldStep"
                     Write-Host "Executing AI-approved action..."
 
-                    python .\ai-engine\deployment_controller.py --execute
+                    python ./ai-engine/deployment_controller.py --execute
 
                     if ($LASTEXITCODE -ne 0) {
                         Write-Host "[FAIL] Deployment controller failed."
@@ -600,7 +600,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "20% Canary Stage" `
                                     -Action END `
                                     -Status SUCCESS
@@ -614,7 +614,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "20% Canary Stage" `
                                     -Action END `
                                     -Status FAILED
@@ -628,7 +628,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "20% Canary Stage" `
                                     -Action END `
                                     -Status ABORTED
@@ -648,7 +648,7 @@
             steps {
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "50% Canary Stage" `
                         -Action START
                 '''
@@ -663,7 +663,7 @@
                         echo 'Preparing the second scenario condition at 50%...'
 
                         powershell '''
-                            & .\jenkins\scripts\inject-demo-fault.ps1 `
+                            & ./jenkins/scripts/inject-demo-fault.ps1 `
                                 -DelayMs 140 `
                                 -ErrorRate 0.06
                         '''
@@ -675,7 +675,7 @@
 
                 powershell '''
                     $Config = Get-Content `
-                        .\jenkins\config\pipeline-config.json `
+                        ./jenkins/config/pipeline-config.json `
                         -Raw |
                         ConvertFrom-Json
 
@@ -689,7 +689,7 @@
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\get-ai-decision.ps1
+                    & ./jenkins/scripts/get-ai-decision.ps1
                 '''
 
                 script {
@@ -698,7 +698,7 @@
                         returnStdout: true,
                         script: '''
                             $Data = Get-Content `
-                                .\ai-engine\ai_decision.json `
+                                ./ai-engine/ai_decision.json `
                                 -Raw |
                                 ConvertFrom-Json
 
@@ -718,7 +718,7 @@
                      */
 
                     powershell '''
-                        python .\ai-engine\deployment_controller.py --execute
+                        python ./ai-engine/deployment_controller.py --execute
 
                         if ($LASTEXITCODE -ne 0) {
                             exit $LASTEXITCODE
@@ -756,7 +756,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "50% Canary Stage" `
                                     -Action END `
                                     -Status SUCCESS
@@ -770,7 +770,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "50% Canary Stage" `
                                     -Action END `
                                     -Status FAILED
@@ -784,7 +784,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "50% Canary Stage" `
                                     -Action END `
                                     -Status ABORTED
@@ -804,14 +804,14 @@
             steps {
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "Final Validation" `
                         -Action START
                 '''
 
                 powershell '''
                     $Config = Get-Content `
-                        .\jenkins\config\pipeline-config.json `
+                        ./jenkins/config/pipeline-config.json `
                         -Raw |
                         ConvertFrom-Json
 
@@ -861,12 +861,12 @@
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\capture-final-validation.ps1
+                    & ./jenkins/scripts/capture-final-validation.ps1
                 '''
 
                 powershell '''
                     $Config = Get-Content `
-                        .\jenkins\config\pipeline-config.json `
+                        ./jenkins/config/pipeline-config.json `
                         -Raw |
                         ConvertFrom-Json
 
@@ -887,7 +887,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Final Validation" `
                                     -Action END `
                                     -Status SUCCESS
@@ -901,7 +901,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Final Validation" `
                                     -Action END `
                                     -Status FAILED
@@ -915,7 +915,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Final Validation" `
                                     -Action END `
                                     -Status ABORTED
@@ -935,13 +935,13 @@
             steps {
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "Generate Report" `
                         -Action START
                 '''
 
                 powershell '''
-                    python .\reporting\generate_report.py
+                    python ./reporting/generate_report.py
 
                     if ($LASTEXITCODE -ne 0) {
                         exit $LASTEXITCODE
@@ -950,7 +950,7 @@
 
                 powershell '''
                     $Report = (
-                        ".\runtime\reports\" +
+                        "./runtime/reports/" +
                         "ai-canary-deployment-report.html"
                     )
 
@@ -978,7 +978,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Generate Report" `
                                     -Action END `
                                     -Status SUCCESS
@@ -992,7 +992,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Generate Report" `
                                     -Action END `
                                     -Status FAILED
@@ -1006,7 +1006,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Generate Report" `
                                     -Action END `
                                     -Status ABORTED
@@ -1026,13 +1026,13 @@
             steps {
 
                 powershell '''
-                    & .\jenkins\scripts\capture-stage.ps1 `
+                    & ./jenkins/scripts/capture-stage.ps1 `
                         -Stage "Cleanup" `
                         -Action START
                 '''
 
                 powershell '''
-                    & .\jenkins\scripts\cleanup-environment.ps1
+                    & ./jenkins/scripts/cleanup-environment.ps1
                 '''
             }
 
@@ -1043,7 +1043,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Cleanup" `
                                     -Action END `
                                     -Status SUCCESS
@@ -1057,7 +1057,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Cleanup" `
                                     -Action END `
                                     -Status FAILED
@@ -1071,7 +1071,7 @@
                         powershell(
                             returnStatus: true,
                             script: '''
-                                & .\jenkins\scripts\capture-stage.ps1 `
+                                & ./jenkins/scripts/capture-stage.ps1 `
                                     -Stage "Cleanup" `
                                     -Action END `
                                     -Status ABORTED
@@ -1102,8 +1102,8 @@
                 def cleanupCode = powershell(
                     returnStatus: true,
                     script: '''
-                        if (Test-Path .\jenkins\scripts\cleanup-environment.ps1) {
-                            & .\jenkins\scripts\cleanup-environment.ps1
+                        if (Test-Path ./jenkins/scripts/cleanup-environment.ps1) {
+                            & ./jenkins/scripts/cleanup-environment.ps1
                         }
                         else {
                             Write-Host "[WARN] cleanup-environment.ps1 not found."
@@ -1134,13 +1134,13 @@
                 echo 'Finalizing complete execution report...'
 
                 powershell '''
-                    python .\reporting\generate_report.py
+                    python ./reporting/generate_report.py
 
                     if ($LASTEXITCODE -ne 0) {
                         exit $LASTEXITCODE
                     }
 
-                    & .\jenkins\scripts\prepare-report-email.ps1
+                    & ./jenkins/scripts/prepare-report-email.ps1
                 '''
 
                 archiveArtifacts(
@@ -1166,7 +1166,7 @@
                         returnStdout: true,
                         script: '''
                             $Meta = Get-Content `
-                                .\runtime\reports\email-metadata.json `
+                                ./runtime/reports/email-metadata.json `
                                 -Raw |
                                 ConvertFrom-Json
 
