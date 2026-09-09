@@ -1040,6 +1040,10 @@ pipeline {
                 '''
 
                 powershell '''
+                    & ./jenkins/scripts/publish-final-dashboard-state.ps1
+                '''
+
+                powershell '''
                     $Config = Get-Content `
                         ./jenkins/config/pipeline-config.json `
                         -Raw |

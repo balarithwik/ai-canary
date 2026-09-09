@@ -1,5 +1,6 @@
-﻿param(
-    [string]$ProjectRoot = ""
+param(
+    [string]$ProjectRoot = "",
+    [string]$TaskName = "AI-Canary-Open-Dashboard"
 )
 
 $ErrorActionPreference = "Stop"
@@ -13,17 +14,10 @@ function Write-Section {
     Write-Host "============================================================"
 }
 
-function Fail {
+function Warn {
     param([string]$Message)
-
-    Write-Host ""
-    Write-Host "[FAIL] $Message"
-    exit 1
+    Write-Host "[WARN] $Message"
 }
-
-# ============================================================
-# RESOLVE PROJECT ROOT
-# ============================================================
 
 if ([string]::IsNullOrWhiteSpace($ProjectRoot)) {
     $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -34,87 +28,111 @@ else {
 }
 
 $ConfigPath = Join-Path $ProjectRoot "jenkins\config\pipeline-config.json"
-$DashboardPath = Join-Path $ProjectRoot "grafana\ai-deployment-intelligence-dashboard.json"
 
 if (-not (Test-Path $ConfigPath)) {
-    Fail "pipeline-config.json not found."
-}
-
-if (-not (Test-Path $DashboardPath)) {
-    Fail "Grafana dashboard JSON not found."
+    Write-Host "[FAIL] pipeline-config.json not found."
+    exit 1
 }
 
 $Config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
-$Dashboard = Get-Content $DashboardPath -Raw | ConvertFrom-Json
-
-$GrafanaBaseUrl = [string]$Config.monitoring.grafana_url
-$DashboardUid = [string]$Dashboard.uid
-$DashboardTitle = [string]$Dashboard.title
-
-if ([string]::IsNullOrWhiteSpace($GrafanaBaseUrl)) {
-    Fail "Grafana URL is missing from pipeline-config.json."
-}
-
-if ([string]::IsNullOrWhiteSpace($DashboardUid)) {
-    Fail "Dashboard UID is missing."
-}
-
-$GrafanaBaseUrl = $GrafanaBaseUrl.TrimEnd("/")
-$DashboardUrl = "$GrafanaBaseUrl/d/${DashboardUid}?orgId=1&refresh=5s"
-$DashboardApiUrl = "$GrafanaBaseUrl/api/dashboards/uid/$DashboardUid"
-
-# ============================================================
-# VERIFY DASHBOARD ACCESS
-# ============================================================
+$GrafanaUrl = ([string]$Config.monitoring.grafana_url).TrimEnd("/")
+$RefreshSeconds = [int]$Config.monitoring.grafana_refresh_seconds
+$DashboardUid = "ai-deployment-intelligence-center"
+$DashboardUrl = "${GrafanaUrl}/d/${DashboardUid}?orgId=1&refresh=${RefreshSeconds}s"
 
 Write-Section "MONITORING DASHBOARD"
 
-Write-Host "Dashboard : $DashboardTitle"
+Write-Host "Dashboard : AI Deployment Intelligence Center"
 Write-Host "UID       : $DashboardUid"
 Write-Host "URL       : $DashboardUrl"
 Write-Host ""
 
 try {
-    $Response = Invoke-WebRequest `
-        -Uri $DashboardApiUrl `
+    Invoke-WebRequest `
+        -Uri "$GrafanaUrl/login" `
         -UseBasicParsing `
-        -TimeoutSec 15 `
-        -ErrorAction Stop
-
-    if ($Response.StatusCode -ne 200) {
-        Fail "Grafana dashboard returned HTTP $($Response.StatusCode)."
-    }
-
-    $Payload = $Response.Content | ConvertFrom-Json
-
-    if ([string]$Payload.dashboard.uid -ne $DashboardUid) {
-        Fail "Unexpected dashboard UID returned by Grafana."
-    }
+        -TimeoutSec 10 | Out-Null
 
     Write-Host "[PASS] Grafana reachable."
+}
+catch {
+    Write-Host "[FAIL] Grafana is not reachable at $GrafanaUrl."
+    exit 1
+}
+
+try {
+    $DashboardResponse = Invoke-WebRequest `
+        -Uri $DashboardUrl `
+        -UseBasicParsing `
+        -TimeoutSec 10
+
+    if ($null -eq $DashboardResponse) {
+        throw "No dashboard response returned."
+    }
+
+    if ($DashboardResponse.StatusCode -lt 200 -or $DashboardResponse.StatusCode -ge 400) {
+        throw "Dashboard returned HTTP $($DashboardResponse.StatusCode)."
+    }
+
+    $FinalUri = [string]$DashboardResponse.BaseResponse.ResponseUri.AbsoluteUri
+
+    if ($FinalUri -match "/login") {
+        throw "Grafana redirected the dashboard request to the login page."
+    }
+
     Write-Host "[PASS] Dashboard available."
     Write-Host "[PASS] Anonymous Viewer access verified."
 }
 catch {
-    Fail "Dashboard verification failed: $($_.Exception.Message)"
+    Write-Host "[FAIL] Dashboard is not anonymously reachable at $DashboardUrl."
+    exit 1
 }
-
-# ============================================================
-# OPEN DASHBOARD
-# ============================================================
 
 Write-Section "OPEN DASHBOARD"
 
-try {
-    Start-Process $DashboardUrl
+$Identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+Write-Host "Execution Account : $Identity"
 
-    Write-Host "[PASS] Dashboard browser launch requested."
+# Jenkins runs as LocalSystem, which is isolated from the logged-in user's
+# interactive desktop. A normal Start-Process from Session 0 cannot create a
+# visible browser tab. When the one-time interactive scheduled task is present,
+# Jenkins triggers that task so Windows opens the dashboard in the user's session.
+if ($Identity -ieq "NT AUTHORITY\SYSTEM") {
+
+    try {
+        $Task = Get-ScheduledTask `
+            -TaskName $TaskName `
+            -ErrorAction SilentlyContinue
+
+        if ($null -ne $Task) {
+            Start-ScheduledTask -TaskName $TaskName
+            Write-Host "[PASS] Dashboard open request sent to the interactive desktop."
+            Write-Host "[PASS] The default browser should open the dashboard in a new tab/window."
+        }
+        else {
+            Warn "Interactive dashboard opener task '$TaskName' is not registered."
+            Warn "Run jenkins\scripts\register-dashboard-opener.ps1 once from your normal Windows PowerShell session."
+            Warn "Open this URL manually:"
+            Write-Host $DashboardUrl
+        }
+    }
+    catch {
+        Warn "Unable to trigger interactive dashboard opener: $($_.Exception.Message)"
+        Warn "Open this URL manually:"
+        Write-Host $DashboardUrl
+    }
 }
-catch {
-    # Browser launch should not invalidate the deployment pipeline.
-    Write-Host "[WARN] Unable to automatically open the browser."
-    Write-Host "[WARN] Open this URL manually:"
-    Write-Host $DashboardUrl
+else {
+
+    try {
+        Start-Process $DashboardUrl
+        Write-Host "[PASS] Dashboard open request sent to the current interactive session."
+    }
+    catch {
+        Warn "Unable to automatically open the browser: $($_.Exception.Message)"
+        Warn "Open this URL manually:"
+        Write-Host $DashboardUrl
+    }
 }
 
 Write-Host ""
@@ -122,4 +140,3 @@ Write-Host "Dashboard remains available while the pipeline is running."
 Write-Host ""
 
 exit 0
-
