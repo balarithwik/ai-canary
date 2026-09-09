@@ -230,6 +230,23 @@ foreach ($definition in $Definitions) {
         "127.0.0.1"
     )
 
+    # Detach long-running port-forward processes from the Jenkins
+# Pipeline durable-task process tree.
+$OriginalJenkinsNodeCookie = $env:JENKINS_NODE_COOKIE
+
+try {
+
+    $SafeName = (
+        [string]$definition.Name
+    ) -replace '[^A-Za-z0-9_-]', '-'
+
+    $env:JENKINS_NODE_COOKIE = (
+        "ai-canary-port-forward-" +
+        $SafeName +
+        "-" +
+        [guid]::NewGuid().ToString("N")
+    )
+
     $process = Start-Process `
         -FilePath "kubectl.exe" `
         -ArgumentList $arguments `
@@ -237,6 +254,17 @@ foreach ($definition in $Definitions) {
         -RedirectStandardOutput $definition.OutLog `
         -RedirectStandardError $definition.ErrLog `
         -PassThru
+}
+finally {
+
+    if ($null -eq $OriginalJenkinsNodeCookie) {
+        Remove-Item Env:JENKINS_NODE_COOKIE `
+            -ErrorAction SilentlyContinue
+    }
+    else {
+        $env:JENKINS_NODE_COOKIE = $OriginalJenkinsNodeCookie
+    }
+}
 
     $Processes += [ordered]@{
         name = $definition.Name
