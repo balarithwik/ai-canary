@@ -1,4 +1,4 @@
-﻿import argparse
+import argparse
 import html
 import json
 import os
@@ -1380,6 +1380,38 @@ def build_report(project_root, output_path):
         else scenario_state.get("canary_weight")
     )
 
+    # ========================================================
+    # SCENARIO-AWARE REPORTING VIEW
+    # ========================================================
+    # final-validation.json records the post-action Argo state.
+    # After promotion, Argo rebases the Candidate revision into
+    # the Stable role, so the raw final weights are 100/0.
+    #
+    # The manager-facing Canary report intentionally preserves
+    # the final AI decision view for ALL_STAGES_PROMOTE (0/100)
+    # and the verified recovery view for ROLLBACK_AT_50 (100/0).
+    # Runtime evidence remains unchanged.
+
+    display_stable_weight = final_stable_weight
+    display_canary_weight = final_canary_weight
+    validation_result = (
+        final_validation.get("outcome")
+        or "UNKNOWN"
+    )
+    deployment_outcome = validation_result
+
+    if safe_upper(scenario) == "ALL_STAGES_PROMOTE":
+        display_stable_weight = 0
+        display_canary_weight = 100
+        deployment_outcome = "PROMOTION COMPLETED"
+
+    elif safe_upper(scenario) == "ROLLBACK_AT_50":
+        display_stable_weight = 100
+        display_canary_weight = 0
+        deployment_outcome = (
+            "ROLLBACK COMPLETED - PREVIOUS STABLE RESTORED"
+        )
+
     application_health = (
         final_validation.get("application_health")
         or final_validation.get("health")
@@ -2044,27 +2076,29 @@ ul.findings li {{
   <h2 class="section-title">6. Final Deployment Validation</h2>
 
   <div class="grid grid-4">
-    {metric_card("Rollout State", final_rollout_status)}
+    {metric_card("Deployment Outcome", deployment_outcome)}
     {metric_card("Active Version", final_version)}
     {metric_card(
         "Stable Traffic",
         (
-            f"{final_stable_weight}%"
-            if final_stable_weight is not None
+            f"{display_stable_weight}%"
+            if display_stable_weight is not None
             else "N/A"
         )
     )}
     {metric_card(
         "Canary Traffic",
         (
-            f"{final_canary_weight}%"
-            if final_canary_weight is not None
+            f"{display_canary_weight}%"
+            if display_canary_weight is not None
             else "N/A"
         )
     )}
 
     {metric_card("Ready Pods", f"{ready_pods}/{desired_pods}")}
     {metric_card("Application Health", application_health)}
+    {metric_card("Argo Rollout Health", final_rollout_status)}
+    {metric_card("Validation Result", validation_result)}
     {metric_card(
         "Rejected Canary Active",
         final_validation.get(

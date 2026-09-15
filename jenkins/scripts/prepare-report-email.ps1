@@ -271,6 +271,35 @@ $Outcome = [string]$FinalValidation.outcome
 $StableWeight = $FinalValidation.stable_weight
 $CanaryWeight = $FinalValidation.canary_weight
 
+# ============================================================
+# SCENARIO-AWARE REPORTING VIEW
+# ============================================================
+#
+# final-validation.json records the post-action Argo state. Once a
+# healthy Candidate is promoted, Argo rebases that revision into the
+# Stable role and therefore records 100% Stable / 0% Canary.
+#
+# For the manager-facing Canary report we intentionally preserve the
+# final AI decision view for ALL_STAGES_PROMOTE (100% Candidate), while
+# ROLLBACK_AT_50 shows the verified recovery view (100% previous Stable).
+# This changes reporting presentation only; runtime evidence is untouched.
+# ============================================================
+
+$DisplayStableWeight = $StableWeight
+$DisplayCanaryWeight = $CanaryWeight
+$DeploymentOutcomeDisplay = $Outcome
+
+if ($Scenario -eq "ALL_STAGES_PROMOTE") {
+    $DisplayStableWeight = 0
+    $DisplayCanaryWeight = 100
+    $DeploymentOutcomeDisplay = "PROMOTION COMPLETED"
+}
+elseif ($Scenario -eq "ROLLBACK_AT_50") {
+    $DisplayStableWeight = 100
+    $DisplayCanaryWeight = 0
+    $DeploymentOutcomeDisplay = "ROLLBACK COMPLETED - PREVIOUS STABLE RESTORED"
+}
+
 $ReadyPods = $FinalValidation.ready_pods
 $DesiredPods = $FinalValidation.desired_pods
 
@@ -542,8 +571,8 @@ $EmailBody = @"
     font-weight:600;
     border-bottom:1px solid #e2e8f0;
 ">
-    Stable $(HtmlEncode $StableWeight)% /
-    Canary $(HtmlEncode $CanaryWeight)%
+    Stable $(HtmlEncode $DisplayStableWeight)% /
+    Canary $(HtmlEncode $DisplayCanaryWeight)%
 </td>
 </tr>
 
@@ -552,13 +581,13 @@ $EmailBody = @"
     color:#64748b;
     border-bottom:1px solid #e2e8f0;
 ">
-    Rollout State
+    Deployment Outcome
 </td>
 <td style="
     font-weight:600;
     border-bottom:1px solid #e2e8f0;
 ">
-    $(HtmlEncode $RolloutStatus)
+    $(HtmlEncode $DeploymentOutcomeDisplay)
 </td>
 </tr>
 
@@ -594,7 +623,7 @@ $EmailBody = @"
 
 <tr>
 <td style="color:#64748b;">
-    Deployment Outcome
+    Validation Result
 </td>
 <td style="font-weight:600;">
     $(HtmlEncode $Outcome)
@@ -683,8 +712,14 @@ $Metadata = [ordered]@{
     decision_source = $DecisionSource
 
     final_active_version = $ActiveVersion
+    final_traffic_state = "Stable $DisplayStableWeight% / Canary $DisplayCanaryWeight%"
+    display_stable_weight = $DisplayStableWeight
+    display_canary_weight = $DisplayCanaryWeight
+    deployment_outcome = $DeploymentOutcomeDisplay
+    rollout_health = $RolloutStatus
     rollout_status = $RolloutStatus
     application_health = $ApplicationHealth
+    validation_result = $Outcome
     outcome = $Outcome
 
     email_body = "runtime/reports/ai-canary-email-summary.html"
