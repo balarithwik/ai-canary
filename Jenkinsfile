@@ -1,11 +1,11 @@
-pipeline {
+﻿pipeline {
 
     agent any
 
     options {
         skipDefaultCheckout(true)
         disableConcurrentBuilds()
-        timeout(time: 45, unit: 'MINUTES')
+        timeout(time: 90, unit: 'MINUTES')
         buildDiscarder(
             logRotator(
                 numToKeepStr: '10'
@@ -1488,3 +1488,4 @@ pipeline {
         }
     }
 }
+
